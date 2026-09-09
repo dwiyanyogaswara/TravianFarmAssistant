@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android" android:layout_width="match_parent" android:layout_height="match_parent">
+<LinearLayout android:orientation="vertical" android:padding="20dp" android:layout_width="match_parent" android:layout_height="wrap_content">
+<TextView android:text="TRAVIAN FARM ASSISTANT" android:textSize="24sp" android:textStyle="bold" android:layout_width="match_parent" android:layout_height="wrap_content"/>
+<EditText android:id="@+id/server" android:hint="Server URL" android:inputType="textUri" android:layout_width="match_parent" android:layout_height="wrap_content"/>
+<EditText android:id="@+id/username" android:hint="Username" android:layout_width="match_parent" android:layout_height="wrap_content"/>
+<EditText android:id="@+id/password" android:hint="Password" android:inputType="textPassword" android:layout_width="match_parent" android:layout_height="wrap_content"/>
+<Spinner android:id="@+id/interval" android:layout_width="match_parent" android:layout_height="wrap_content"/>
+<Spinner android:id="@+id/duration" android:layout_width="match_parent" android:layout_height="wrap_content"/>
+<CheckBox android:id="@+id/list1" android:text="Farm List 1" android:checked="true" android:layout_width="match_parent" android:layout_height="wrap_content"/>
+<CheckBox android:id="@+id/list2" android:text="Farm List 2" android:checked="true" android:layout_width="match_parent" android:layout_height="wrap_content"/>
+<CheckBox android:id="@+id/list3" android:text="Farm List 3" android:checked="true" android:layout_width="match_parent" android:layout_height="wrap_content"/>
+<TextView android:id="@+id/status" android:text="Status: STOPPED" android:textSize="18sp" android:layout_marginTop="16dp" android:layout_width="match_parent" android:layout_height="wrap_content"/>
+<TextView android:id="@+id/nextRun" android:text="Next run: --" android:layout_width="match_parent" android:layout_height="wrap_content"/>
+<LinearLayout android:orientation="horizontal" android:layout_width="match_parent" android:layout_height="wrap_content">
+<Button android:id="@+id/start" android:text="MULAI" android:layout_weight="1" android:layout_width="0dp" android:layout_height="wrap_content"/>
+<Button android:id="@+id/stop" android:text="STOP" android:layout_weight="1" android:layout_width="0dp" android:layout_height="wrap_content"/>
+</LinearLayout>
+<Button android:id="@+id/openFarm" android:text="BUKA FARM LIST" android:layout_width="match_parent" android:layout_height="wrap_content"/>
+<TextView android:text="Pengingat saja: Send All tetap dilakukan manual." android:layout_marginTop="16dp" android:layout_width="match_parent" android:layout_height="wrap_content"/>
+</LinearLayout></ScrollView>
