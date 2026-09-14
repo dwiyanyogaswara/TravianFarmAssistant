@@ -2984,7 +2984,7 @@ private fun clickTransferSelected() {
         updateNotification("Next Run ${timeFormat.format(Date(nextAt))} | dalam ${formatDuration(delay)}")
     }
 
-    private val nextRunRunnable = Runnable {
+    private val nextRunRunnable: Runnable = Runnable {
         if (!running) return@Runnable
         val remaining = nextAt - System.currentTimeMillis()
         if (nextAt <= 0L) return@Runnable
