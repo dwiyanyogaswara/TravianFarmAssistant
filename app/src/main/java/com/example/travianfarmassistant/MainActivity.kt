@@ -1915,29 +1915,23 @@ class MainActivity : Activity() {
         val scannedVillageLink = "${normalizeServer(serverInput.text.toString())}/dorf1.php?newdid=$id"
         val existingRecord = loadVillageDataRecords().firstOrNull { it.id == id }
 
-        // Village dengan resource terendah L10+ tidak perlu masuk database lagi.
-        // Tujuannya mengurangi pekerjaan Resource Builder pada siklus berikutnya.
-        if (minLevel >= 10 || (minLevel < 0 && lowestResourceLevel >= 10)) {
-            val before = loadVillageDataRecords()
-            val after = before.filterNot { it.id == id }
-            if (after.size != before.size) saveVillageDataRecords(after)
-            villageMinLevels.remove(id)
-            logEvent("UI: [$id] ${name} dihapus dari DATABASE VILLAGE karena MinLvl=L$minLevel (>=10)")
-        } else {
-            upsertVillageDataRecord(
-                id = id,
-                namaVillage = name,
-                linkVillage = scannedVillageLink,
-                linkResource = lowestResourceHref.takeIf { it.isNotBlank() },
-                resourceId = lowestResourceId.takeIf { it.isNotBlank() },
-                resourceGid = lowestResourceGid.takeIf { it.isNotBlank() },
-                minLvl = minLevel,
-                isChecklist = existingRecord?.isChecklist
-            )
-            if (minLevel >= 0) logEvent("Village $name Updated min L$minLevel")
+        // Semua village tetap disimpan di DATABASE VILLAGE, termasuk yang
+        // resource terendahnya sudah L10+. Village tersebut tetap diperlukan
+        // oleh Town Builder. Resource Builder sendiri akan melewati target yang
+        // tidak tersedia, sedangkan Town Builder tetap dapat memproses LinkTown.
+        upsertVillageDataRecord(
+            id = id,
+            namaVillage = name,
+            linkVillage = scannedVillageLink,
+            linkResource = lowestResourceHref.takeIf { it.isNotBlank() },
+            resourceId = lowestResourceId.takeIf { it.isNotBlank() },
+            resourceGid = lowestResourceGid.takeIf { it.isNotBlank() },
+            minLvl = minLevel,
+            isChecklist = existingRecord?.isChecklist
+        )
+        if (minLevel >= 0) logEvent("Village $name Updated min L$minLevel")
 
-            villageMinLevels[id] = minLevel
-            }
+        villageMinLevels[id] = minLevel
 
         val progress = "${villageScanIndex + 1}/${villageScanTargets.size}"
 
