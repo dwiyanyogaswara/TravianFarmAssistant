@@ -286,22 +286,31 @@ class FarmAutomationService : Service() {
         updateNotification("Siklus dihentikan oleh watchdog 5 menit")
     }
 
-    // Pengaman scheduler: Handler callback dapat hilang/terlambat ketika WebView
-    // sibuk. Pemeriksaan berkala memastikan Next Run tetap dieksekusi.
+    // Pengaman scheduler: callback Next Run bisa hilang ketika WebView sibuk
+    // atau saat service menerima ACTION_START setelah OFF -> ON. Heartbeat
+    // harus selalu dipasang kembali dan tidak boleh mengosongkan nextAt sebelum
+    // cycle benar-benar berhasil dimulai.
     private val schedulerHeartbeatRunnable = object : Runnable {
         override fun run() {
             if (!running) return
-            val now = System.currentTimeMillis()
-            val cycleActive = getSharedPreferences(PREFS, MODE_PRIVATE)
-                .getBoolean("cycle_active", false)
-            if (!cycleActive && nextAt > 0L && now >= nextAt) {
-                logEvent("SCHEDULER HEARTBEAT: Next Run terlewat — memulai siklus")
-                handler.removeCallbacks(nextRunRunnable)
-                nextAt = 0L
-                triggerScheduledCycle()
+            try {
+                val now = System.currentTimeMillis()
+                val cycleActive = getSharedPreferences(PREFS, MODE_PRIVATE)
+                    .getBoolean("cycle_active", false)
+
+                if (!cycleActive && nextAt > 0L && now >= nextAt) {
+                    handler.removeCallbacks(nextRunRunnable)
+                    triggerScheduledCycle()
+                }
+            } finally {
+                if (running) handler.postDelayed(this, 5_000L)
             }
-            handler.postDelayed(this, 15_000L)
         }
+    }
+
+    private fun armSchedulerHeartbeat() {
+        handler.removeCallbacks(schedulerHeartbeatRunnable)
+        if (running) handler.postDelayed(schedulerHeartbeatRunnable, 5_000L)
     }
     /**
      * Refresh Village dijalankan 30 detik setelah countdown dimulai.
@@ -381,7 +390,7 @@ class FarmAutomationService : Service() {
         instanceRef = WeakReference(this)
         createNotificationChannel()
         startForeground(NOTIFICATION_ID, buildNotification("Farm Assistant aktif"))
-        handler.postDelayed(schedulerHeartbeatRunnable, 15_000L)
+        armSchedulerHeartbeat()
         handler.post { recoverAfterProcessRecreation() }
     }
 
@@ -416,6 +425,9 @@ class FarmAutomationService : Service() {
                 // Pastikan callback/state sisa dari sesi sebelumnya tidak ikut terbawa.
                 // Ini penting untuk skenario OFF → ON tanpa menutup aplikasi.
                 handler.removeCallbacksAndMessages(null)
+                // removeCallbacksAndMessages(null) juga menghapus heartbeat scheduler.
+                // Pasang ulang agar Next Run tetap terjaga setelah OFF -> ON.
+                armSchedulerHeartbeat()
                 pendingStartAll = false
                 builderInProgress = false
                 loginInProgress = false
@@ -477,6 +489,7 @@ class FarmAutomationService : Service() {
             recoveringService = false
             if (cycleActive || delay <= 0L) {
                 logEvent("RECOVERY: siklus terakhir belum selesai/interval sudah lewat; memulai ulang siklus")
+                nextAt = if (delay <= 0L) 0L else savedNextAt
                 triggerScheduledCycle()
             } else {
                 logEvent("RECOVERY: scheduler dipulihkan; run berikutnya dalam ${((delay + 999L) / 1000L)} detik")
@@ -669,6 +682,10 @@ class FarmAutomationService : Service() {
         scheduledRefreshForNextRun = false
         val now = timeFormat.format(Date())
         cycleNumber += 1
+        // Next Run sudah dikonsumsi. Setelah titik ini heartbeat tidak akan
+        // mencoba menjalankan cycle yang sama untuk kedua kalinya.
+        nextAt = 0L
+        updateNextRun(0L)
         farmListCycleStartedAt = if (farmListEnabled) System.currentTimeMillis() else 0L
         resourceBuilderCycleStartedAt = 0L
         farmListCycleComplete = !farmListEnabled
@@ -2969,6 +2986,14 @@ private fun clickTransferSelected() {
 
     private val nextRunRunnable = Runnable {
         if (!running) return@Runnable
+        val remaining = nextAt - System.currentTimeMillis()
+        if (nextAt <= 0L) return@Runnable
+        if (remaining > 0L) {
+            // Callback boleh berjalan sedikit lebih cepat karena kondisi Handler.
+            // Jangan pernah memulai cycle sebelum waktu Next Run benar-benar tiba.
+            handler.postDelayed(nextRunRunnable, remaining)
+            return@Runnable
+        }
         logEvent("Countdown berakhir — memulai siklus")
         triggerScheduledCycle()
     }
