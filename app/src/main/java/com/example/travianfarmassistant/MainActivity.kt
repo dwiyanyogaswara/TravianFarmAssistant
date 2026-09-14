@@ -997,8 +997,16 @@ class MainActivity : Activity() {
                 gravity = android.view.Gravity.CENTER_VERTICAL
                 layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
             }
+            val currentMinLevel = record?.minLvl ?: -1
+            val currentTownKey = record?.linkTown?.trim().orEmpty().ifBlank { "-" }
+            fun townDisplayText(townKey: String): String {
+                val townText = townOptions.firstOrNull { it.first == townKey }?.second ?: "-"
+                val minText = if (currentMinLevel >= 0) "L$currentMinLevel" else "-"
+                return "$name - min lvl $minText - $townText"
+            }
+
             val box = CheckBox(this).apply {
-                text = name
+                text = townDisplayText(currentTownKey)
                 tag = id
                 layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
                 isEnabled = !selectionControlsLocked
@@ -1041,13 +1049,14 @@ class MainActivity : Activity() {
                         return tv
                     }
                 }
-                val current = record?.linkTown?.trim().orEmpty().ifBlank { "-" }
+                val current = currentTownKey
                 setSelection(townOptions.indexOfFirst { it.first == current }.coerceAtLeast(0))
                 isEnabled = !selectionControlsLocked
                 onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
                     override fun onNothingSelected(parent: android.widget.AdapterView<*>?) = Unit
                     override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: View?, position: Int, itemId: Long) {
                         val selectedLink = townOptions.getOrNull(position)?.first ?: "-"
+                        box.text = townDisplayText(selectedLink)
                         val recordsNow = loadVillageDataRecords()
                         val idx = recordsNow.indexOfFirst { it.id == id }
                         if (idx >= 0) {
@@ -1945,29 +1954,23 @@ class MainActivity : Activity() {
         val scannedVillageLink = "${normalizeServer(serverInput.text.toString())}/dorf1.php?newdid=$id"
         val existingRecord = loadVillageDataRecords().firstOrNull { it.id == id }
 
-        // Village dengan resource terendah L10+ tidak perlu masuk database lagi.
-        // Tujuannya mengurangi pekerjaan Resource Builder pada siklus berikutnya.
-        if (minLevel >= 10 || (minLevel < 0 && lowestResourceLevel >= 10)) {
-            val before = loadVillageDataRecords()
-            val after = before.filterNot { it.id == id }
-            if (after.size != before.size) saveVillageDataRecords(after)
-            villageMinLevels.remove(id)
-            logEvent("UI: [$id] ${name} dihapus dari DATABASE VILLAGE karena MinLvl=L$minLevel (>=10)")
-        } else {
-            upsertVillageDataRecord(
-                id = id,
-                namaVillage = name,
-                linkVillage = scannedVillageLink,
-                linkResource = lowestResourceHref.takeIf { it.isNotBlank() },
-                resourceId = lowestResourceId.takeIf { it.isNotBlank() },
-                resourceGid = lowestResourceGid.takeIf { it.isNotBlank() },
-                minLvl = minLevel,
-                isChecklist = existingRecord?.isChecklist
-            )
-            if (minLevel >= 0) logEvent("Village $name Updated min L$minLevel")
+        // Village dengan resource terendah L10+ TETAP disimpan di database.
+        // Resource Builder sendiri yang menentukan village mana yang dikerjakan
+        // berdasarkan checklist. Dengan begitu village L10+ tetap tersedia untuk
+        // Town Builder meskipun checklist Resource Builder tidak dicentang.
+        upsertVillageDataRecord(
+            id = id,
+            namaVillage = name,
+            linkVillage = scannedVillageLink,
+            linkResource = lowestResourceHref.takeIf { it.isNotBlank() },
+            resourceId = lowestResourceId.takeIf { it.isNotBlank() },
+            resourceGid = lowestResourceGid.takeIf { it.isNotBlank() },
+            minLvl = minLevel,
+            isChecklist = existingRecord?.isChecklist
+        )
+        if (minLevel >= 0) logEvent("Village $name Updated min L$minLevel")
 
-            villageMinLevels[id] = minLevel
-            }
+        villageMinLevels[id] = minLevel
 
         val progress = "${villageScanIndex + 1}/${villageScanTargets.size}"
 

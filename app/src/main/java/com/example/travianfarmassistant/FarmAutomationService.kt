@@ -1577,34 +1577,29 @@ class FarmAutomationService : Service() {
             val records = loadVillageDataRecordsFromPrefs().toMutableList()
             val pos = records.indexOfFirst { it.id == expectedId }
 
-            if (minLevel >= 10) {
-                if (pos >= 0) {
-                    records.removeAt(pos)
-                    saveVillageDataRecordsForService(records)
-                }
-                logEvent(
-                    "AUTO REFRESH VILLAGE: $expectedName dihapus dari DATABASE — " +
-                        "MinLvl=L$minLevel (>=10)"
-                )
-            } else if (
-                pos >= 0 &&
-                href.isNotBlank() &&
-                resourceId in 1..18 &&
-                resourceGid in 1..4 &&
-                minLevel >= 0
-            ) {
+            // Village L10+ tetap dipertahankan di database. Resource Builder
+            // memfilter berdasarkan checklist, sedangkan Town Builder memfilter
+            // berdasarkan Link Town != "-". Jangan pernah menghapus record hanya
+            // karena resource terendah sudah mencapai L10.
+            if (pos >= 0 && minLevel >= 0) {
                 val old = records[pos]
+                val validResourceTarget =
+                    href.isNotBlank() && resourceId in 1..18 && resourceGid in 1..4
                 records[pos] = old.copy(
                     namaVillage = json.optString("name").trim().ifBlank { expectedName },
                     linkVillage = "$server/dorf1.php?newdid=$expectedId",
-                    linkResource = href,
-                    resourceId = resourceId.toString(),
-                    resourceGid = resourceGid.toString(),
+                    linkResource = if (validResourceTarget) href else "",
+                    resourceId = if (validResourceTarget) resourceId.toString() else "",
+                    resourceGid = if (validResourceTarget) resourceGid.toString() else "",
                     minLvl = minLevel
                 )
                 saveVillageDataRecordsForService(records)
 
-                logEvent("Village $expectedName Updated min L$minLevel")
+                if (validResourceTarget) {
+                    logEvent("Village $expectedName Updated min L$minLevel")
+                } else {
+                    logEvent("Village $expectedName Updated min L$minLevel — Resource Builder target selesai; database tetap disimpan")
+                }
             } else {
                 logEvent(
                     "AUTO REFRESH VILLAGE: $expectedName target tidak valid — " +
