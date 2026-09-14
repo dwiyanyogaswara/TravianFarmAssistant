@@ -311,6 +311,65 @@ class FarmAutomationService : Service() {
     private fun armSchedulerHeartbeat() {
         handler.removeCallbacks(schedulerHeartbeatRunnable)
         if (running) handler.postDelayed(schedulerHeartbeatRunnable, 5_000L)
+        armFourMinuteScheduler()
+    }
+
+    // Pengaman tambahan: setiap 4 menit cek countdown berdasarkan nextAt.
+    // Jika countdown sudah 00:00 tetapi cycle belum dimulai, semua proses/callback
+    // yang sedang berjalan dihentikan dan cycle baru langsung dipaksa mulai.
+    private val fourMinuteSchedulerRunnable: Runnable = object : Runnable {
+        override fun run() {
+            if (!running) return
+            try {
+                val now = System.currentTimeMillis()
+                val cycleActive = getSharedPreferences(PREFS, MODE_PRIVATE)
+                    .getBoolean("cycle_active", false)
+                val countdownExpired = nextAt > 0L && now >= nextAt
+
+                if (!cycleActive && countdownExpired) {
+                    logEvent("Scheduler 4 Menit: Countdown 00:00 — reset proses dan mulai CICLE")
+
+                    // Hentikan pekerjaan yang mungkin masih menahan WebView/Handler.
+                    handler.removeCallbacks(nextRunRunnable)
+                    handler.removeCallbacks(delayedVillageRefreshRunnable)
+                    handler.removeCallbacks(cycleWatchdogRunnable)
+                    villageRefreshTimeoutRunnable?.let { handler.removeCallbacks(it) }
+                    villageRefreshTimeoutRunnable = null
+                    try { automationWebView()?.stopLoading() } catch (_: Exception) {}
+
+                    pendingStartAll = false
+                    builderInProgress = false
+                    loginInProgress = false
+                    reloginRequested = false
+                    countdownCyclePending = false
+                    scheduledRefreshForNextRun = false
+                    villageRefreshInProgress = false
+                    villageRefreshInspectInFlight = false
+                    villageRefreshCompleted = true
+                    villageRefreshClosed = true
+                    farmListCycleComplete = false
+                    pendingUpgradeUrl = ""
+                    pendingUpgradeCosts = longArrayOf(0L, 0L, 0L, 0L)
+                    heroTransferCompleted = false
+                    nextAt = 0L
+                    updateNextRun(0L)
+                    getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                        .putBoolean("cycle_active", false)
+                        .apply()
+
+                    handler.post {
+                        if (running) triggerScheduledCycle()
+                    }
+                }
+            } finally {
+                if (running) handler.postDelayed(this, 4 * 60_000L)
+            }
+        }
+    }
+
+    private fun armFourMinuteScheduler() {
+        handler.removeCallbacks(fourMinuteSchedulerRunnable)
+        if (running) handler.postDelayed(fourMinuteSchedulerRunnable, 4 * 60_000L)
     }
     /**
      * Refresh Village dijalankan 30 detik setelah countdown dimulai.
@@ -615,6 +674,7 @@ class FarmAutomationService : Service() {
         }
 
         running = true
+        armSchedulerHeartbeat()
         cycleNumber = 0
         pendingStartAll = false
         loginInProgress = false
@@ -3072,6 +3132,7 @@ private fun clickTransferSelected() {
         pendingStartAll = false
         handler.removeCallbacks(cycleWatchdogRunnable)
         handler.removeCallbacks(schedulerHeartbeatRunnable)
+        handler.removeCallbacks(fourMinuteSchedulerRunnable)
         handler.removeCallbacks(delayedVillageRefreshRunnable)
         villageRefreshInProgress = false
         villageRefreshCompleted = false
