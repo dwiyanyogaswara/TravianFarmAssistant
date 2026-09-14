@@ -1575,10 +1575,6 @@ class FarmAutomationService : Service() {
             val records = loadVillageDataRecordsFromPrefs().toMutableList()
             val pos = records.indexOfFirst { it.id == expectedId }
 
-            // Jangan menghapus village hanya karena resource terendah sudah L10+.
-            // Record tetap dibutuhkan Town Builder agar LinkTown village tersebut
-            // tetap tersedia pada cycle berikutnya. Resource Builder akan melewati
-            // target resource yang kosong/tidak relevan secara normal.
             if (
                 pos >= 0 &&
                 href.isNotBlank() &&

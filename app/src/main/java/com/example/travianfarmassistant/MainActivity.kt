@@ -281,6 +281,8 @@ class MainActivity : Activity() {
     // Link village disimpan saat discovery agar Builder dapat mengikuti link village yang sama.
     private val villageScanCollectedLinks = linkedMapOf<String, String>()
     private var villageScanCollectInFlight = false
+    // Token per langkah scan agar callback halaman/redirect lama diabaikan.
+    private var villageScanStepToken = 0L
 
     private val handler = Handler(Looper.getMainLooper())
     private var running = false
@@ -451,8 +453,13 @@ class MainActivity : Activity() {
                 if (villageScanActive) {
                     // Satu onPageFinished bisa terpanggil beberapa kali (redirect/hash/consent).
                     // Jangan menembakkan evaluateJavascript scan berulang secara bersamaan.
+                    val scanToken = villageScanStepToken
+                    val scanIndex = villageScanIndex
                     handler.postDelayed({
                         if (!villageScanActive) return@postDelayed
+                        // Callback dari halaman/redirect village sebelumnya tidak boleh
+                        // memicu scan untuk index yang baru.
+                        if (scanToken != villageScanStepToken || scanIndex != villageScanIndex) return@postDelayed
                         val target = villageScanTargets.getOrNull(villageScanIndex)
                         if (target != null) {
                             if (!villageScanCollectInFlight) collectCurrentVillageData()
@@ -1213,6 +1220,7 @@ class MainActivity : Activity() {
         villageScanCollectedTargets.clear()
         villageScanCollectedLinks.clear()
         villageScanCollectInFlight = false
+        villageScanStepToken = 0L
         resetVillageResourceDataForRefresh()
         clearSavedResourceBuilderTargets()
 
@@ -1441,6 +1449,8 @@ class MainActivity : Activity() {
             return
         }
 
+        // Satu token untuk satu village. Callback lama otomatis gugur.
+        villageScanStepToken++
         val (id, name) = villageScanTargets[villageScanIndex]
 
         val progress = "${villageScanIndex + 1}/${villageScanTargets.size}"
@@ -1571,6 +1581,7 @@ class MainActivity : Activity() {
         val target = villageScanTargets.getOrNull(villageScanIndex) ?: return
         val expectedId = target.first
         val expectedIdJson = JSONObject.quote(expectedId)
+        val scanToken = villageScanStepToken
         villageScanCollectInFlight = true
 
         val js = """
@@ -1598,7 +1609,7 @@ class MainActivity : Activity() {
 
                 if (currentId !== expectedId) {
                     AndroidFarm.onVillageScanResult(JSON.stringify({
-                        notReady:true, reason:'WRONG_VILLAGE', id:currentId, expectedId,
+                        scanToken:$scanToken, notReady:true, reason:'WRONG_VILLAGE', id:currentId, expectedId,
                         url, activeId, activeName, pageTitle:document.title || '',
                         readyState:document.readyState
                     }));
@@ -1825,7 +1836,7 @@ class MainActivity : Activity() {
                 // jika 18 field sudah tersedia; resource akan disimpan bila lengkap.
                 if (!container || !resourceFieldsComplete) {
                     AndroidFarm.onVillageScanResult(JSON.stringify({
-                        notReady:true, reason:'FIELDS_NOT_READY', id:currentId, expectedId,
+                        scanToken:$scanToken, notReady:true, reason:'FIELDS_NOT_READY', id:currentId, expectedId,
                         url, activeId, activeName, fieldCount:uniqueLevels.length,
                         resourceComplete, resourceContainer:!!container, resources,
                         lowestResource, debugFields:debugFields.slice(0,12)
@@ -1841,7 +1852,7 @@ class MainActivity : Activity() {
                 );
 
                 AndroidFarm.onVillageScanResult(JSON.stringify({
-                    id:expectedId, name:pageName, minLevel:(lowestResource?.level ?? Math.min(...uniqueLevels)),
+                    scanToken:$scanToken, id:expectedId, name:pageName, minLevel:(lowestResource?.level ?? Math.min(...uniqueLevels)),
                     fields:uniqueLevels, fieldNodeCount:uniqueFields, resourceFieldCount:uniqueFields,
                     debugFieldCount:debugFields.length, debugFields,
                     resourceContainer:true, activeId, activeName, url, resources, lowestResource
@@ -1856,6 +1867,9 @@ class MainActivity : Activity() {
         if (!villageScanActive) return
 
         val json = runCatching { JSONObject(rawJson) }.getOrNull()
+        // Hanya hasil dari langkah scan yang sedang aktif boleh mengubah index.
+        val resultToken = json?.optLong("scanToken", -1L) ?: -1L
+        if (resultToken >= 0L && resultToken != villageScanStepToken) return
 
         if (json?.optBoolean("notReady", false) == true) {
             villageScanCollectInFlight = false
@@ -1875,7 +1889,9 @@ class MainActivity : Activity() {
                             "url=${json.optString("url").ifBlank { "-" }}"
                     )
                 }
-                handler.postDelayed({ if (villageScanActive) collectCurrentVillageData() }, 700)
+                handler.postDelayed({
+                    if (villageScanActive && resultToken == villageScanStepToken) collectCurrentVillageData()
+                }, 700)
             } else {
                 // Satu village gagal tidak boleh mengunci seluruh scanner.
                 val (_, name) = villageScanTargets[villageScanIndex]
@@ -1883,10 +1899,15 @@ class MainActivity : Activity() {
                     "UI: [${villageScanIndex + 1}/${villageScanTargets.size}] " +
                         "$name timeout; village dilewati"
                 )
-                villageScanIndex++
+                val nextIndex = villageScanIndex + 1
+                villageScanIndex = nextIndex
                 villageScanDataRetry = 0
                 villageScanCollectInFlight = false
-                handler.postDelayed({ visitNextVillageForScan() }, 500)
+                handler.postDelayed({
+                    if (villageScanActive && resultToken == villageScanStepToken && villageScanIndex == nextIndex) {
+                        visitNextVillageForScan()
+                    }
+                }, 500)
             }
             return
         }
@@ -1915,23 +1936,37 @@ class MainActivity : Activity() {
         val scannedVillageLink = "${normalizeServer(serverInput.text.toString())}/dorf1.php?newdid=$id"
         val existingRecord = loadVillageDataRecords().firstOrNull { it.id == id }
 
-        // Semua village tetap disimpan di DATABASE VILLAGE, termasuk yang
-        // resource terendahnya sudah L10+. Village tersebut tetap diperlukan
-        // oleh Town Builder. Resource Builder sendiri akan melewati target yang
-        // tidak tersedia, sedangkan Town Builder tetap dapat memproses LinkTown.
-        upsertVillageDataRecord(
-            id = id,
-            namaVillage = name,
-            linkVillage = scannedVillageLink,
-            linkResource = lowestResourceHref.takeIf { it.isNotBlank() },
-            resourceId = lowestResourceId.takeIf { it.isNotBlank() },
-            resourceGid = lowestResourceGid.takeIf { it.isNotBlank() },
-            minLvl = minLevel,
-            isChecklist = existingRecord?.isChecklist
-        )
-        if (minLevel >= 0) logEvent("Village $name Updated min L$minLevel")
+        // Village tetap disimpan walaupun resource terendah sudah L10+.
+        // Resource Builder cukup melewati target resource tersebut, sedangkan Town Builder
+        // tetap membutuhkan record village dan Link Town.
+        if (minLevel >= 10 || (minLevel < 0 && lowestResourceLevel >= 10)) {
+            upsertVillageDataRecord(
+                id = id,
+                namaVillage = name,
+                linkVillage = scannedVillageLink,
+                linkResource = lowestResourceHref.takeIf { it.isNotBlank() },
+                resourceId = lowestResourceId.takeIf { it.isNotBlank() },
+                resourceGid = lowestResourceGid.takeIf { it.isNotBlank() },
+                minLvl = minLevel,
+                isChecklist = existingRecord?.isChecklist
+            )
+            villageMinLevels[id] = minLevel
+            logEvent("Village $name Updated min L$minLevel")
+        } else {
+            upsertVillageDataRecord(
+                id = id,
+                namaVillage = name,
+                linkVillage = scannedVillageLink,
+                linkResource = lowestResourceHref.takeIf { it.isNotBlank() },
+                resourceId = lowestResourceId.takeIf { it.isNotBlank() },
+                resourceGid = lowestResourceGid.takeIf { it.isNotBlank() },
+                minLvl = minLevel,
+                isChecklist = existingRecord?.isChecklist
+            )
+            if (minLevel >= 0) logEvent("Village $name Updated min L$minLevel")
 
-        villageMinLevels[id] = minLevel
+            villageMinLevels[id] = minLevel
+            }
 
         val progress = "${villageScanIndex + 1}/${villageScanTargets.size}"
 
@@ -2021,8 +2056,13 @@ class MainActivity : Activity() {
                 if (resourceText.isNotBlank()) "; $resourceText" else ""
         )
 
-        villageScanIndex++
-        handler.postDelayed({ visitNextVillageForScan() }, 250)
+        val nextIndex = villageScanIndex + 1
+        villageScanIndex = nextIndex
+        handler.postDelayed({
+            if (villageScanActive && resultToken == villageScanStepToken && villageScanIndex == nextIndex) {
+                visitNextVillageForScan()
+            }
+        }, 250)
     }
 
     private fun finishVillageScan() {
