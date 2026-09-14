@@ -779,7 +779,7 @@ class FarmAutomationService : Service() {
                             return JSON.stringify({ok: currentId === expected, currentId, activeId, urlId});
                         })();
                     """.trimIndent()) { raw ->
-                        val result = raw.orEmpty().trim('"').replace("\\\"", "\"")
+            val result = raw.orEmpty().trim('"').replace("\\\"", "\"")
                         val currentId = Regex("\"currentId\":\"(\\d*)\"").find(result)
                             ?.groupValues?.getOrNull(1).orEmpty()
                         if (result.contains("\"ok\":true")) {
@@ -1091,7 +1091,7 @@ class FarmAutomationService : Service() {
         """.trimIndent()
 
         automationWebView()?.evaluateJavascript(js) { raw ->
-            val result = raw.orEmpty().trim('"').replace("\\"", "\"")
+            val result = raw.orEmpty().trim('"').replace("\\\"", "\"")
             val after = Regex("\"totalAfter\":(\\d+)").find(result)?.groupValues?.get(1)?.toIntOrNull()
                 ?: raidCountBeforeStartAll
             val difference = after - raidCountBeforeStartAll
@@ -1578,7 +1578,7 @@ class FarmAutomationService : Service() {
         """.trimIndent()
 
         automationWebView()?.evaluateJavascript(js) { raw ->
-            val result = raw.orEmpty().trim().trim('"').replace("\\\"", "\"")
+            val result = raw.orEmpty().trim('"').replace("\\\"", "\"")
             val json = runCatching { JSONObject(result) }.getOrNull()
             villageRefreshInspectInFlight = false
 
