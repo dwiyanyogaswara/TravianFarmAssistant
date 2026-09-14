@@ -972,7 +972,7 @@ class FarmAutomationService : Service() {
                 const statusCount = () => {
                     let total = 0;
                     for (const el of document.querySelectorAll('#rallyPointFarmList .farmListStatus, .farmListStatus')) {
-                        const m = norm(el.textContent).match(/(\d+)\s*\/\s*(\d+)/);
+                        const m = norm(el.textContent).match(/(\d+)[^0-9]+(\d+)/);
                         if (m) total += parseInt(m[1], 10);
                     }
                     return total;
@@ -1076,13 +1076,13 @@ class FarmAutomationService : Service() {
                 let total = 0;
                 for (const wrapper of document.querySelectorAll('#rallyPointFarmList .farmListWrapper')) {
                     const text = norm(wrapper.querySelector('.farmListStatus')?.textContent || '');
-                    const m = text.match(/(\d+)\s*\/\s*(\d+)/);
+                    const m = text.match(/(\d+)[^0-9]+(\d+)/);
                     if (m) total += parseInt(m[1], 10);
                 }
                 // Fallback untuk markup Travian yang tidak memakai wrapper standar.
                 if (total === 0) {
                     for (const el of document.querySelectorAll('#rallyPointFarmList .farmListStatus')) {
-                        const m = norm(el.textContent).match(/(\d+)\s*\/\s*(\d+)/);
+                        const m = norm(el.textContent).match(/(\d+)[^0-9]+(\d+)/);
                         if (m) total += parseInt(m[1], 10);
                     }
                 }
@@ -1135,7 +1135,7 @@ class FarmAutomationService : Service() {
                 for (const wrapper of document.querySelectorAll('#rallyPointFarmList .farmListWrapper')) {
                     wrappers++;
                     const status = wrapper.querySelector('.farmListStatus');
-                    const m = norm(status?.textContent || '').match(/(\d+)\s*\/\s*(\d+)/);
+                    const m = norm(status?.textContent || '').match(/(\d+)[^0-9]+(\d+)/);
                     if (m) total += parseInt(m[1], 10);
                     const btn = wrapper.querySelector('button.startFarmList');
                     if (btn && visible(btn) && !btn.disabled && btn.getAttribute('disabled') === null && btn.getAttribute('aria-disabled') !== 'true') ready++;
@@ -1199,7 +1199,7 @@ class FarmAutomationService : Service() {
                 const statusCount = () => {
                     let total = 0;
                     for (const wrapper of document.querySelectorAll('#rallyPointFarmList .farmListWrapper')) {
-                        const m = (wrapper.querySelector('.farmListStatus')?.textContent || '').replace(/\s+/g,' ').match(/(\d+)\s*\/\s*(\d+)/);
+                        const m = (wrapper.querySelector('.farmListStatus')?.textContent || '').replace(/\s+/g,' ').match(/(\d+)[^0-9]+(\d+)/);
                         if (m) total += parseInt(m[1],10);
                     }
                     return total;
@@ -1249,7 +1249,7 @@ class FarmAutomationService : Service() {
                 let total = 0, wrappers = 0;
                 for (const wrapper of document.querySelectorAll('#rallyPointFarmList .farmListWrapper')) {
                     wrappers++;
-                    const m = norm(wrapper.querySelector('.farmListStatus')?.textContent || '').match(/(\d+)\s*\/\s*(\d+)/);
+                    const m = norm(wrapper.querySelector('.farmListStatus')?.textContent || '').match(/(\d+)[^0-9]+(\d+)/);
                     if (m) total += parseInt(m[1], 10);
                 }
                 const allText = norm(document.querySelector('#rallyPointFarmList')?.innerText || '');
