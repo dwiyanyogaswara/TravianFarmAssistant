@@ -69,6 +69,30 @@ class CelebrationActivity : Activity() {
             setPadding(12, 12, 12, 12)
         }
 
+        val nav = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+        }
+        fun navButton(label: String, action: () -> Unit): Button =
+            Button(this).apply {
+                text = label
+                textSize = 11f
+                setOnClickListener { action() }
+                layoutParams = LinearLayout.LayoutParams(0, -2, 1f)
+            }
+        nav.addView(navButton("Farm Res Builder") { finish() })
+        nav.addView(navButton("Capacity") {
+            startActivity(android.content.Intent(this@CelebrationActivity, MainActivity::class.java)
+                .putExtra("openTab", "capacity"))
+        })
+        nav.addView(navButton("DB Overview") {
+            startActivity(android.content.Intent(this@CelebrationActivity, MainActivity::class.java)
+                .putExtra("openTab", "db"))
+        })
+        nav.addView(navButton("Log") {
+            startActivity(android.content.Intent(this@CelebrationActivity, MainActivity::class.java)
+                .putExtra("openTab", "log"))
+        })
+
         refresh = Button(this).apply {
             text = "Refresh Celebration"
             setOnClickListener { startRefresh() }
@@ -85,6 +109,7 @@ class CelebrationActivity : Activity() {
         val horizontal = HorizontalScrollView(this).apply { addView(table) }
         val scroll = ScrollView(this).apply { addView(horizontal) }
 
+        root.addView(nav)
         root.addView(refresh)
         root.addView(status)
         root.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
@@ -318,9 +343,13 @@ class CelebrationActivity : Activity() {
         """.trimIndent()
 
         webView?.evaluateJavascript(js) { raw ->
-            val result = raw.orEmpty().trim().removeSurrounding("\"")
-                .replace("\\\"", "\"")
-                .replace("\\\\", "\\")
+            val result = runCatching {
+                org.json.JSONTokener(raw.orEmpty()).nextValue().toString()
+            }.getOrElse {
+                raw.orEmpty().trim().removeSurrounding("\"")
+                    .replace("\\\"", "\"")
+                    .replace("\\\\", "\\")
+            }
 
             val hasTownHall = Regex("\\\"hasTownHall\\\"\\s*:\\s*(true|false)")
                 .find(result)?.groupValues?.getOrNull(1) == "true"

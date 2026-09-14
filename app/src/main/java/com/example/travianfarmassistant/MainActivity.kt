@@ -344,6 +344,11 @@ class MainActivity : Activity() {
         recentLogs = findViewById(R.id.recentLogs)
         botToggle = findViewById(R.id.botToggle)
         setupTabs()
+        when (intent.getStringExtra("openTab")) {
+            "capacity" -> capacityTabButton.performClick()
+            "db" -> dbTabButton.performClick()
+            "log" -> logTabButton.performClick()
+        }
         renderCapacityOverview()
         refreshLogOverview()
 
