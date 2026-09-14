@@ -3107,27 +3107,58 @@ private fun clickTransferSelected() {
     }
 
     private fun logEvent(message: String) {
-        val clean = when {
-            message == "CICLE START" -> "CICLE START"
-            message == "Click Send All Farmlist Success" -> "Click Send All Farmlist Success"
-            message == "CICLE END" -> "CICLE END"
-            message.startsWith("Village ") && message.contains(" Upgrade to Level ") && message.endsWith(" Success") -> message
-            message.startsWith("Village ") && message.endsWith(" Upgrade Success") -> message
-            message.startsWith("Village ") && message.endsWith(" no upgrade") -> message
-            message.startsWith("Village ") && message.contains(" Updated min L") -> message
-            message.startsWith("Town Builder:") -> message
-            message.startsWith("Town Village ") -> message
-            message.startsWith("Next Run: ") -> message
-            message == "REFRESH VILLAGE START" -> "REFRESH VILLAGE START"
-            message == "REFRESH VILLAGE END" -> "REFRESH VILLAGE END"
-            message == "BOT ON" -> "BOT ON"
-            message == "BOT OFF" -> "BOT OFF"
-            else -> return
+        // Town Builder sudah stabil. Simpan hanya log ringkas yang memang berguna
+        // untuk melihat hasil setiap village; detail internal Town Builder dibuang.
+        val clean = if (townBuilderInProgress) {
+            when {
+                message.startsWith("Town Builder: START") -> "Town Builder - START"
+                message.startsWith("Village ") && message.contains(" Upgrade to Level ") && message.endsWith(" Success") -> {
+                    val village = message.removePrefix("Village ").substringBefore(" Upgrade to Level ")
+                    "Town Builder - Village $village upgrade to level success"
+                }
+                message.startsWith("Village ") && message.endsWith(" Upgrade Success") -> {
+                    val village = message.removePrefix("Village ").removeSuffix(" Upgrade Success")
+                    "Town Builder - Village $village upgrade to level success"
+                }
+                message.startsWith("Village ") && message.endsWith(" no upgrade") -> {
+                    val village = message.removePrefix("Village ").removeSuffix(" no upgrade")
+                    "Town Builder - Village $village no upgrade"
+                }
+                else -> return
+            }
+        } else {
+            when {
+                message == "CICLE START" -> "CICLE START"
+                message == "Click Send All Farmlist Success" -> "Click Send All Farmlist Success"
+                message == "CICLE END" -> "CICLE END"
+                message.startsWith("Village ") && message.contains(" Upgrade to Level ") && message.endsWith(" Success") -> message
+                message.startsWith("Village ") && message.endsWith(" Upgrade Success") -> message
+                message.startsWith("Village ") && message.endsWith(" no upgrade") -> message
+                message.startsWith("Village ") && message.contains(" Updated min L") -> message
+                message.startsWith("Next Run: ") -> message
+                message == "REFRESH VILLAGE START" -> "REFRESH VILLAGE START"
+                message == "REFRESH VILLAGE END" -> "REFRESH VILLAGE END"
+                message == "BOT ON" -> "BOT ON"
+                message == "BOT OFF" -> "BOT OFF"
+                else -> return
+            }
         }
+
+        // Next Run di log dibuat sekali saat countdown dimulai dan menyertakan
+        // sisa countdown dalam format MM:SS, misalnya 05:20.
+        val finalClean = if (clean.startsWith("Next Run: ")) {
+            val remaining = (nextAt - System.currentTimeMillis()).coerceAtLeast(0L)
+            val totalSeconds = remaining / 1000L
+            val minutes = totalSeconds / 60L
+            val seconds = totalSeconds % 60L
+            val target = clean.removePrefix("Next Run: ").trim()
+            "Next Run: $target - Count Down ${String.format(Locale.getDefault(), "%02d:%02d", minutes, seconds)}"
+        } else clean
+
         // Tandai setiap event yang termasuk siklus aktif. LogActivity memakai marker
         // ini untuk memberi warna berbeda pada setiap CYCLE tanpa mengubah isi pesan.
-        val cycleMessages = clean != "BOT ON" && clean != "BOT OFF"
-        val cycleTagged = if (cycleMessages && cycleNumber > 0) "[CYCLE $cycleNumber] $clean" else clean
+        val cycleMessages = finalClean != "BOT ON" && finalClean != "BOT OFF"
+        val cycleTagged = if (cycleMessages && cycleNumber > 0) "[CYCLE $cycleNumber] $finalClean" else finalClean
         val line = "${logTimeFormat.format(Date())} | $cycleTagged"
         try {
             openFileOutput(logFileName, MODE_APPEND).bufferedWriter().use { it.appendLine(line) }

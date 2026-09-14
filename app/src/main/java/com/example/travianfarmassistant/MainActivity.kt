@@ -1002,7 +1002,11 @@ class MainActivity : Activity() {
             fun townDisplayText(townKey: String): String {
                 val townText = townOptions.firstOrNull { it.first == townKey }?.second ?: "-"
                 val minText = if (currentMinLevel >= 0) "L$currentMinLevel" else "-"
-                return "$name - min lvl $minText - $townText"
+                // loadedVillages may already contain the old resource level suffix
+                // (e.g. "A1 - Lvl 10"). For the Town Builder label, show only the
+                // village name followed by the current minimum resource level.
+                val displayName = name.substringBefore(" - Lvl ").trim().ifBlank { name }
+                return "$displayName - min lvl $minText - $townText"
             }
 
             val box = CheckBox(this).apply {
