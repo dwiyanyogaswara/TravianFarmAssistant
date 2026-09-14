@@ -134,7 +134,13 @@ class LogActivity : Activity() {
         val message = line.substringAfter(" | ", line).trim().replaceFirst(Regex("^\\[CYCLE \\d+\\]\\s*"), "")
         return message == "CICLE START" ||
             message == "Click Send All Farmlist Success" ||
+            message.startsWith("Farmlist Before: ") ||
+            message.startsWith("Farmlist After: ") ||
+            message.startsWith("Farmlist Added: ") ||
             message == "CICLE END" ||
+            message == "Town Builder - START" ||
+            message == "Town Builder - END" ||
+            message.startsWith("Town Builder - Village ") ||
             message.startsWith("Village ") && message.contains(" Upgrade to Level ") && message.endsWith(" Success") ||
             message.startsWith("Village ") && message.endsWith(" Upgrade Success") ||
             message.startsWith("Village ") && message.endsWith(" no upgrade") ||

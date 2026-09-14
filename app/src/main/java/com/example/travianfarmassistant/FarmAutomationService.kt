@@ -735,7 +735,7 @@ class FarmAutomationService : Service() {
                 loginRetryCount = 0
                 if (pendingStartAll) {
                     startAllAttempt = 0
-                    handler.postDelayed({ clickStartAllFarmLists() }, 3000)
+                    handler.postDelayed({ clickStartAllFarmLists() }, 1200)
                 }
                 return@acceptCookiesIfPresent
             }
@@ -986,10 +986,14 @@ class FarmAutomationService : Service() {
                 };
                 const dispatch = btn => {
                     btn.scrollIntoView({block:'center'});
-                    // Gunakan native HTMLElement.click() saja. Jangan menambahkan
-                    // mousedown/mouseup buatan karena handler Travian dapat menerima
-                    // dua jalur event dan menyebabkan dispatch tidak konsisten.
-                    try { return btn.click() !== false; } catch (_) { return false; }
+                    // Gunakan native HTMLElement.click() terlebih dahulu. Beberapa
+                    // handler Travian/jQuery tidak bereaksi terhadap MouseEvent buatan.
+                    try { btn.click(); } catch (_) {}
+                    // Event fallback untuk markup/handler lama.
+                    try {
+                        btn.dispatchEvent(new MouseEvent('mousedown', {bubbles:true, cancelable:true, view:window}));
+                        btn.dispatchEvent(new MouseEvent('mouseup', {bubbles:true, cancelable:true, view:window}));
+                    } catch (_) {}
                 };
                 const selectors = [
                     '#rallyPointFarmList button.startAllFarmLists',
@@ -1004,8 +1008,8 @@ class FarmAutomationService : Service() {
                     if (btn) {
                         const before = statusCount();
                         const beforeReady = readyCount();
-                        const clicked = dispatch(btn);
-                        return JSON.stringify({state: clicked ? 'clicked' : 'click-error', before, beforeReady, selector});
+                        dispatch(btn);
+                        return JSON.stringify({state:'clicked', before, beforeReady, selector});
                     }
                 }
                 const candidates = [...document.querySelectorAll('button,input[type=button],input[type=submit],a,[role=button]')];
@@ -1017,8 +1021,8 @@ class FarmAutomationService : Service() {
                 if (textBtn) {
                     const before = statusCount();
                     const beforeReady = readyCount();
-                    const clicked = dispatch(textBtn);
-                    return JSON.stringify({state: clicked ? 'clicked' : 'click-error', before, beforeReady, selector:'text'});
+                    dispatch(textBtn);
+                    return JSON.stringify({state:'clicked', before, beforeReady, selector:'text'});
                 }
                 return JSON.stringify({state:'not-found', before:statusCount(), beforeReady:readyCount()});
             })();
@@ -1026,9 +1030,7 @@ class FarmAutomationService : Service() {
         automationWebView()?.evaluateJavascript(js) { raw ->
             val result = raw.orEmpty().trim('"').replace("\\\"", "\"")
             if (result.contains("\"state\":\"clicked\"")) {
-                // Jangan langsung menganggap klik sebagai SUCCESS. Simpan kondisi
-                // sebelum klik, lalu verifikasi perubahan DOM/status Travian terlebih dahulu.
-                pendingStartAll = true
+                pendingStartAll = false
                 startAllAttempt = 0
                 raidVerificationAttempt = 0
                 farmListProgressObserved = false
@@ -1036,8 +1038,18 @@ class FarmAutomationService : Service() {
                 farmListStableChecks = 0
                 fallbackFarmListMode = false
                 raidCountBeforeStartAll = Regex("\"before\":(\\d+)").find(result)?.groupValues?.get(1)?.toIntOrNull() ?: 0
-                farmListBeforeReady = Regex("\"beforeReady\":(\\d+)").find(result)?.groupValues?.get(1)?.toIntOrNull() ?: 0
-                handler.postDelayed({ verifyRaidDispatch() }, 1500L)
+                farmListBeforeReady = Regex("\"readyBefore\":(\\d+)").find(result)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+                val now = timeFormat.format(Date())
+                getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString("last_run", now).apply()
+                logEvent("Farmlist Before: $raidCountBeforeStartAll")
+                logEvent("Click Send All Farmlist Success")
+                updateNotification("Farm List — menunggu 1 menit agar semua raid terkirim")
+                
+                // Send All adalah satu aksi dispatch. Tidak perlu polling status tombol
+                // berulang-ulang karena tombol bisa tetap aktif walaupun semua request
+                // sudah masuk. Beri Travian 60 detik untuk menyelesaikan seluruh dispatch,
+                // lalu lanjut ke Resource Builder.
+                handler.postDelayed({ finishFarmListAfterOneMinute() }, 60_000L)
             } else if (startAllAttempt < 10) {
                 startAllAttempt++
                 handler.postDelayed({ clickStartAllFarmLists() }, 1000)
@@ -1054,29 +1066,63 @@ class FarmAutomationService : Service() {
         if (!running) return
         pendingStartAll = false
         fallbackFarmListMode = false
-        val now = System.currentTimeMillis()
-        if (farmListCycleStartedAt > 0L) {
-            val farmDuration = (now - farmListCycleStartedAt).coerceAtLeast(0L)
-            getSharedPreferences(PREFS, MODE_PRIVATE).edit()
-                .putLong("farm_cycle_duration_ms", farmDuration)
-                .putLong("farm_cycle_started_at", 0L)
-                .apply()
-            logEvent("Farm List: waktu proses ${formatDuration(farmDuration)}; jeda dispatch 60 detik selesai")
-            farmListCycleStartedAt = 0L
-        } else {
-            logEvent("Farm List: jeda dispatch 60 detik selesai")
-        }
 
-        farmListCycleComplete = true
-        maybeStartResourceBuilderAfterRefresh()
+        // Setelah Send All, tunggu tepat 1 menit lalu baca ulang jumlah
+        // "being raided" dari semua Farm List yang sedang tampil di halaman.
+        // Yang dihitung hanya angka sebelum tanda "/", misalnya 87 dari 87/98.
+        val js = """
+            (() => {
+                const norm = s => (s || '').replace(/\s+/g, ' ').trim();
+                let total = 0;
+                for (const wrapper of document.querySelectorAll('#rallyPointFarmList .farmListWrapper')) {
+                    const text = norm(wrapper.querySelector('.farmListStatus')?.textContent || '');
+                    const m = text.match(/(\d+)\s*\/\s*(\d+)/);
+                    if (m) total += parseInt(m[1], 10);
+                }
+                // Fallback untuk markup Travian yang tidak memakai wrapper standar.
+                if (total === 0) {
+                    for (const el of document.querySelectorAll('#rallyPointFarmList .farmListStatus')) {
+                        const m = norm(el.textContent).match(/(\d+)\s*\/\s*(\d+)/);
+                        if (m) total += parseInt(m[1], 10);
+                    }
+                }
+                return JSON.stringify({totalAfter: total});
+            })();
+        """.trimIndent()
+
+        automationWebView()?.evaluateJavascript(js) { raw ->
+            val result = raw.orEmpty().trim('"').replace("\\"", "\"")
+            val after = Regex("\"totalAfter\":(\\d+)").find(result)?.groupValues?.get(1)?.toIntOrNull()
+                ?: raidCountBeforeStartAll
+            val difference = after - raidCountBeforeStartAll
+
+            logEvent("Farmlist After: $after")
+            logEvent("Farmlist Added: ${if (difference >= 0) "+$difference" else difference.toString()}")
+
+            val now = System.currentTimeMillis()
+            if (farmListCycleStartedAt > 0L) {
+                val farmDuration = (now - farmListCycleStartedAt).coerceAtLeast(0L)
+                getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                    .putLong("farm_cycle_duration_ms", farmDuration)
+                    .putLong("farm_cycle_started_at", 0L)
+                    .apply()
+                farmListCycleStartedAt = 0L
+            }
+
+            farmListCycleComplete = true
+            maybeStartResourceBuilderAfterRefresh()
+        }
     }
 
     private fun verifyRaidDispatch(): Unit {
         debugTrace("ENTER verifyRaidDispatch")
         if (!running) return
 
-        // Setelah Send All diklik, tunggu bukti dari DOM bahwa Travian benar-benar
-        // memproses dispatch. Klik DOM saja tidak cukup untuk menyatakan SUCCESS.
+        // Farm List adalah aksi dispatch, bukan proses yang harus ditunggu sampai
+        // semua tombol Start menjadi disabled. Pada Travian tombol Start sering tetap
+        // aktif walaupun request raid sudah berhasil dikirim. Verifikasi lama bisa
+        // polling 20x + fallback + reload sampai watchdog 5 menit dan membuat
+        // Resource Builder tidak pernah kebagian waktu.
         val js = """
             (() => {
                 const visible = el => {
@@ -1096,7 +1142,7 @@ class FarmAutomationService : Service() {
                 }
                 const allText = norm(document.querySelector('#rallyPointFarmList')?.innerText || '');
                 const busy = /sending|loading|processing|mengirim|memproses/.test(allText);
-                return JSON.stringify({total, wrappers, ready, busy, readyState:document.readyState});
+                return JSON.stringify({total, wrappers, ready, busy});
             })();
         """.trimIndent()
 
@@ -1111,28 +1157,30 @@ class FarmAutomationService : Service() {
                 farmListProgressObserved = true
             }
 
+            // Beri AJAX Travian waktu singkat untuk mulai, tetapi jangan pernah
+            // menahan siklus sampai menit ke-5 hanya karena tombol Start tetap aktif.
             val elapsedChecks = raidVerificationAttempt
-            val evidence = current > raidCountBeforeStartAll || ready < farmListBeforeReady
+            val dispatchSettled = wrappers > 0 && !busy &&
+                (farmListProgressObserved || elapsedChecks >= 4)
 
-            if (wrappers > 0 && evidence) {
+            if (dispatchSettled || elapsedChecks >= 6) {
+                val sent = (current - raidCountBeforeStartAll).coerceAtLeast(0)
+                logEvent(
+                    "Farm List selesai dispatch: $sent raid terdeteksi; " +
+                        "tombol Start aktif=$ready; verifikasi=${elapsedChecks + 1}x — lanjut Resource Builder"
+                )
                 pendingStartAll = false
                 fallbackFarmListMode = false
-                farmListCycleComplete = true
-                val now = timeFormat.format(Date())
-                getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString("last_run", now).apply()
-                logEvent("Click Send All Farmlist Success")
-                updateNotification("Farm List — raid berhasil diproses, menunggu penyelesaian")
-                handler.postDelayed({ finishFarmListAfterOneMinute() }, 60_000L)
-            } else if (elapsedChecks < 14) {
-                raidVerificationAttempt++
-                handler.postDelayed({ verifyRaidDispatch() }, 1000L)
-            } else {
-                pendingStartAll = false
-                fallbackFarmListMode = false
-                logEvent("Send All Farmlist Failed")
-                updateNotification("Farm List — Send All tidak terverifikasi")
                 farmListCycleComplete = true
                 maybeStartResourceBuilderAfterRefresh()
+            } else {
+                raidVerificationAttempt++
+                logEvent(
+                    "Farm List verifikasi ${raidVerificationAttempt}/6; raid=$current; " +
+                        "tombol Start aktif=$ready; busy=$busy; progress=${if (farmListProgressObserved) "YA" else "BELUM"}"
+                )
+                updateNotification("Farm List — dispatch ${raidVerificationAttempt}/6")
+                handler.postDelayed({ verifyRaidDispatch() }, 1000)
             }
         }
     }
@@ -1174,12 +1222,14 @@ class FarmAutomationService : Service() {
         automationWebView()?.evaluateJavascript(js) { raw ->
             val result = raw.orEmpty().trim('"').replace("\\\"", "\"")
             val clicked = Regex("\"clicked\":(\\d+)").find(result)?.groupValues?.get(1)?.toIntOrNull() ?: 0
-                farmListBeforeReady = Regex("\"readyBefore\":(\\d+)").find(result)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+            farmListBeforeReady = Regex("\"readyBefore\":(\\d+)").find(result)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+            raidCountBeforeStartAll = Regex("\"totalBefore\":(\\d+)").find(result)?.groupValues?.get(1)?.toIntOrNull() ?: 0
             farmListProgressObserved = false
             farmListLastState = ""
             farmListStableChecks = 0
             fallbackFarmListMode = true
-            logEvent("Fallback Start per Farm List: $clicked tombol diklik; sebelum=$farmListBeforeReady tombol siap; menunggu 60 detik")
+            logEvent("Farmlist Before: $raidCountBeforeStartAll")
+            if (clicked > 0) logEvent("Click Send All Farmlist Success")
             raidVerificationAttempt = 0
             updateNotification("Farm List — fallback, menunggu 1 menit")
             handler.postDelayed({ finishFarmListAfterOneMinute() }, 60_000L)
@@ -3091,6 +3141,17 @@ private fun clickTransferSelected() {
     }
 
     private fun logEvent(message: String) {
+        // END Town Builder harus tetap dicatat walaupun flag townBuilderInProgress
+        // sudah dimatikan sebelum fungsi ini dipanggil.
+        if (message == "Town Builder: END") {
+            val cycleTagged = if (cycleNumber > 0) "[CYCLE $cycleNumber] Town Builder - END" else "Town Builder - END"
+            val line = "${logTimeFormat.format(Date())} | $cycleTagged"
+            try {
+                openFileOutput(logFileName, MODE_APPEND).bufferedWriter().use { it.appendLine(line) }
+            } catch (_: Exception) {}
+            return
+        }
+
         // Town Builder sudah stabil. Simpan hanya log ringkas yang memang berguna
         // untuk melihat hasil setiap village; detail internal Town Builder dibuang.
         val clean = if (townBuilderInProgress) {
@@ -3114,7 +3175,9 @@ private fun clickTransferSelected() {
             when {
                 message == "CICLE START" -> "CICLE START"
                 message == "Click Send All Farmlist Success" -> "Click Send All Farmlist Success"
-                message == "Send All Farmlist Failed" -> "Send All Farmlist Failed"
+                message.startsWith("Farmlist Before: ") -> message
+                message.startsWith("Farmlist After: ") -> message
+                message.startsWith("Farmlist Added: ") -> message
                 message == "CICLE END" -> "CICLE END"
                 message.startsWith("Village ") && message.contains(" Upgrade to Level ") && message.endsWith(" Success") -> message
                 message.startsWith("Village ") && message.endsWith(" Upgrade Success") -> message
