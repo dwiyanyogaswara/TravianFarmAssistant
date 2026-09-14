@@ -28,6 +28,15 @@
             android:layout_height="wrap_content"
             android:layout_weight="1"/>
         <Button
+            android:id="@+id/dbTabButton"
+            android:text="🗄 DB Overview"
+            android:backgroundTint="#455A64"
+            android:textColor="#FFFFFF"
+            android:textSize="12sp"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"/>
+        <Button
             android:id="@+id/logTabButton"
             android:text="📋 Log"
             android:backgroundTint="#6A1B9A"
@@ -169,18 +178,6 @@
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"/>
                     <TextView
-                        android:id="@+id/villageDatabaseView"
-                        android:text="DATABASE VILLAGE: kosong"
-                        android:textSize="10sp"
-                        android:typeface="monospace"
-                        android:textIsSelectable="true"
-                        android:padding="6dp"
-                        android:layout_marginTop="6dp"
-                        android:background="#202020"
-                        android:textColor="#FFFFFF"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"/>
-                    <TextView
                         android:text="Pilih village untuk Resource Builder"
                         android:textStyle="bold"
                         android:layout_marginTop="4dp"
@@ -213,6 +210,11 @@
                     <TextView
                         android:id="@+id/resourceCycleTime"
                         android:text="Waktu Siklus Resource Builder: 00:00:00"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"/>
+                    <TextView
+                        android:id="@+id/townCycleTime"
+                        android:text="Waktu Siklus Town Builder: 00:00:00"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"/>
                     <TextView
@@ -314,6 +316,39 @@
             <LinearLayout
                 android:id="@+id/capacityOverview"
                 android:orientation="vertical"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"/>
+        </LinearLayout>
+    </ScrollView>
+
+    <ScrollView
+        android:id="@+id/dbTab"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:fillViewport="true"
+        android:visibility="gone">
+        <LinearLayout
+            android:orientation="vertical"
+            android:padding="8dp"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content">
+            <TextView
+                android:text="DATABASE VILLAGE"
+                android:textSize="20sp"
+                android:textStyle="bold"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"/>
+            <TextView
+                android:id="@+id/villageDatabaseView"
+                android:text="DATABASE VILLAGE: kosong"
+                android:textSize="10sp"
+                android:typeface="monospace"
+                android:textIsSelectable="true"
+                android:padding="6dp"
+                android:layout_marginTop="6dp"
+                android:background="#202020"
+                android:textColor="#FFFFFF"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"/>
         </LinearLayout>

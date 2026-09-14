@@ -253,6 +253,7 @@ class FarmAutomationService : Service() {
     private var cycleNumber = 0
     private var farmListCycleStartedAt = 0L
     private var resourceBuilderCycleStartedAt = 0L
+    private var townBuilderCycleStartedAt = 0L
     private var recoveringService = false
     private var webViewRecoveryInProgress = false
     private var lastAutomationUrl = ""
@@ -454,6 +455,7 @@ class FarmAutomationService : Service() {
         cycleNumber = prefs.getInt("current_cycle_number", 0)
         farmListCycleStartedAt = prefs.getLong("farm_cycle_started_at", 0L)
         resourceBuilderCycleStartedAt = prefs.getLong("resource_cycle_started_at", 0L)
+        townBuilderCycleStartedAt = prefs.getLong("town_cycle_started_at", 0L)
 
         if (username.isBlank() || password.isBlank()) {
             logEvent("RECOVERY: credential database kosong/tidak valid; recovery dibatalkan")
@@ -1575,7 +1577,16 @@ class FarmAutomationService : Service() {
             val records = loadVillageDataRecordsFromPrefs().toMutableList()
             val pos = records.indexOfFirst { it.id == expectedId }
 
-            if (
+            if (minLevel >= 10) {
+                if (pos >= 0) {
+                    records.removeAt(pos)
+                    saveVillageDataRecordsForService(records)
+                }
+                logEvent(
+                    "AUTO REFRESH VILLAGE: $expectedName dihapus dari DATABASE — " +
+                        "MinLvl=L$minLevel (>=10)"
+                )
+            } else if (
                 pos >= 0 &&
                 href.isNotBlank() &&
                 resourceId in 1..18 &&
@@ -1832,12 +1843,12 @@ class FarmAutomationService : Service() {
             val result = raw.orEmpty().trim('"').replace("\\\"", "\"")
 
             if (result.contains("\"state\":\"upgrade_available\"")) {
-                logEvent("Resource Builder: halaman mengandung teks 'Upgrade to level' — langsung klik Upgrade")
+                logEvent(if (townBuilderInProgress) "Town Builder: 'Upgrade to level' ditemukan — langsung klik Upgrade" else "Resource Builder: halaman mengandung teks 'Upgrade to level' — langsung klik Upgrade")
                 heroTransferCompleted = false
                 pendingUpgradeCosts = longArrayOf(0L, 0L, 0L, 0L)
                 clickResourceUpgrade()
             } else {
-                logEvent("Resource Builder: halaman tidak mengandung teks 'Upgrade to level' — masuk jalur Hero Transfer")
+                logEvent(if (townBuilderInProgress) "Town Builder: 'Upgrade to level' tidak ditemukan — masuk jalur Hero Transfer" else "Resource Builder: halaman tidak mengandung teks 'Upgrade to level' — masuk jalur Hero Transfer")
                 pendingUpgradeCosts = longArrayOf(0L, 0L, 0L, 0L)
                 pendingUpgradeUrl = automationWebView()?.url.orEmpty().ifBlank { "$server/build.php" }
                 inventoryUseAttempt = 0
@@ -1948,6 +1959,7 @@ class FarmAutomationService : Service() {
 
                 val normalized = decoded.replace("\\\"", "\"")
                 if (decoded.contains("\"ok\":true") || normalized.contains("\"ok\":true")) {
+                    if (townBuilderInProgress) logEvent("Town Builder: Hero resource transfer dibuka")
                     debugTrace(
                         "HERO TRANSFER: BERHASIL klik .inlineIcon.resource.transfer"
                     )
@@ -1959,7 +1971,9 @@ class FarmAutomationService : Service() {
                     )
                     handler.postDelayed({ attempt(attempt + 1) }, 700L)
                 } else {
-                    logEvent(
+                    logEvent(if (townBuilderInProgress)
+                        "Town Builder: tombol resource Hero tidak ditemukan; coba Upgrade"
+                    else
                         "Resource Builder: .inlineIcon.resource.transfer tidak ditemukan/gagal; langsung upgrade"
                     )
                     pendingUpgradeCosts = longArrayOf(0L, 0L, 0L, 0L)
@@ -2074,7 +2088,7 @@ private fun clickTransferSelected() {
             val result = raw.orEmpty().trim('"').replace("\\\"", "\"")
 
             if (result.contains("\"state\":\"clicked\"")) {
-                logEvent("Resource Builder: Transfer selected DIKLIK — menunggu popup memproses transfer")
+                logEvent(if (townBuilderInProgress) "Town Builder: Transfer Selected diklik — tunggu popup" else "Resource Builder: Transfer selected DIKLIK — menunggu popup memproses transfer")
 
                 // Jangan langsung menganggap berhasil. Tunggu sebentar lalu
                 // verifikasi apakah tombol Transfer Selected masih ada.
@@ -2086,7 +2100,7 @@ private fun clickTransferSelected() {
                 debugTrace("HERO TRANSFER: tombol Transfer selected belum ditemukan, retry $inventoryUseAttempt/15")
                 handler.postDelayed({ clickTransferSelected() }, 500L)
             } else {
-                logEvent("Resource Builder: tombol Transfer selected tidak ditemukan setelah 15 percobaan")
+                logEvent(if (townBuilderInProgress) "Town Builder: tombol Transfer Selected tidak ditemukan setelah 15 percobaan" else "Resource Builder: tombol Transfer selected tidak ditemukan setelah 15 percobaan")
                 pendingUpgradeUrl = ""
                 pendingUpgradeCosts = longArrayOf(0L,0L,0L,0L)
                 goToNextBuilderVillage()
@@ -2135,7 +2149,7 @@ private fun clickTransferSelected() {
             val result = raw.orEmpty().trim('"').replace("\\\"", "\"")
 
             if (result.contains("\"stillThere\":false")) {
-                logEvent("Resource Builder: Transfer Selected terkonfirmasi selesai — langsung Upgrade")
+                logEvent(if (townBuilderInProgress) "Town Builder: Transfer Selected selesai — lanjut Upgrade" else "Resource Builder: Transfer Selected terkonfirmasi selesai — langsung Upgrade")
                 heroTransferCompleted = true
                 pendingUpgradeCosts = longArrayOf(0L,0L,0L,0L)
                 handler.postDelayed({ clickResourceUpgrade() }, 700L)
@@ -2144,7 +2158,7 @@ private fun clickTransferSelected() {
                 debugTrace("HERO TRANSFER: Transfer Selected masih ada; menunggu proses (${inventoryUseAttempt}/18)")
                 handler.postDelayed({ verifyTransferSelectedCompleted() }, 700L)
             } else {
-                logEvent("Resource Builder: Transfer Selected belum terkonfirmasi selesai; village dilewati demi mencegah upgrade palsu")
+                logEvent(if (townBuilderInProgress) "Town Builder: Transfer Selected tidak terkonfirmasi; village dilewati" else "Resource Builder: Transfer Selected belum terkonfirmasi selesai; village dilewati demi mencegah upgrade palsu")
                 pendingUpgradeUrl = ""
                 pendingUpgradeCosts = longArrayOf(0L,0L,0L,0L)
                 goToNextBuilderVillage()
@@ -2155,20 +2169,36 @@ private fun clickTransferSelected() {
     private fun startTownBuilderCycle() {
         debugTrace("ENTER startTownBuilderCycle")
         if (!running || !townBuilderEnabled || townBuilderInProgress) return
-        refreshBuilderSelectionFromPrefs()
-        if (!loadBuilderStateFromVillageData()) {
-            logEvent("CICLE END")
-            scheduleNextRandomRun()
-            return
+
+        // Town Builder TIDAK mengikuti checklist Resource Builder.
+        // Ia memproses SEMUA record database yang Link Town-nya bukan "-".
+        val records = loadVillageDataRecordsFromPrefs()
+        persistRebasedVillageData(records)
+        builderVillages.clear()
+        builderVillageLinks.clear()
+        builderResourceLinks.clear()
+        builderTownLinks.clear()
+        builderResourceLevels.clear()
+
+        records.forEach { record ->
+            builderVillageLinks[record.id] = record.linkVillage
+            builderResourceLinks[record.id] = record.linkResource
+            builderTownLinks[record.id] = record.linkTown.ifBlank { "-" }
+            if (record.minLvl >= 0) builderResourceLevels[record.id] = record.minLvl
         }
-        builderVillages = loadBuilderVillagesFromSnapshot()
-            .filter { builderTownLinks[it.first].orEmpty().isNotBlank() && builderTownLinks[it.first] != "-" }
+
+        builderVillages = records
+            .filter { it.linkTown.trim().isNotBlank() && it.linkTown.trim() != "-" }
+            .map { it.id to it.namaVillage }
+            .distinctBy { it.first }
             .toMutableList()
+
         if (builderVillages.isEmpty()) {
-            logEvent("CICLE END")
-            scheduleNextRandomRun()
+            logEvent("Town Builder: tidak ada village dengan Link Town")
+            finishTownBuilderCycle()
             return
         }
+
         townBuilderInProgress = true
         builderInProgress = true
         builderVillageIndex = 0
@@ -2179,6 +2209,14 @@ private fun clickTransferSelected() {
         pendingUpgradeCosts = longArrayOf(0L, 0L, 0L, 0L)
         heroTransferCompleted = false
         inventoryUseAttempt = 0
+
+        townBuilderCycleStartedAt = System.currentTimeMillis()
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+            .putLong("town_cycle_started_at", townBuilderCycleStartedAt)
+            .apply()
+
+        logEvent("Town Builder: START — ${builderVillages.size} village Link Town aktif")
+        logEvent("Town Builder: target = ${builderVillages.joinToString(" | ") { "${it.second} [${it.first}]" }}")
         updateNotification("Town Builder — ${builderVillages.size} village")
         processTownBuilderVillage()
     }
@@ -2199,6 +2237,7 @@ private fun clickTransferSelected() {
         }
         val target = withNewDid(rebaseTravianUrl(href), id)
         builderStage = "TOWN_LOAD"
+        logEvent("Town Builder: [${builderVillageIndex + 1}/${builderVillages.size}] $name — buka Link Town")
         pendingUpgradeUrl = target
         pendingUpgradeCosts = longArrayOf(0L,0L,0L,0L)
         heroTransferCompleted = false
@@ -2223,17 +2262,22 @@ private fun clickTransferSelected() {
         val url = automationWebView()?.url.orEmpty()
         if (expected.isBlank() || url.isBlank()) return
         builderStage = "TOWN_INSPECT"
+        val name = builderVillages.getOrNull(builderVillageIndex)?.second ?: "Village ${builderVillageIndex + 1}"
+        logEvent("Town Builder: $name — halaman Link Town selesai dimuat; tunggu 3 detik DOM")
         handler.postDelayed({
             if (!running || !townBuilderInProgress || !builderInProgress) return@postDelayed
             pendingUpgradeUrl = url
             pendingUpgradeCosts = longArrayOf(0L,0L,0L,0L)
             inventoryUseAttempt = 0
+            logEvent("Town Builder: $name — mulai cek Upgrade to level")
             inspectUpgradeResourcesAfterDomReady()
         }, 3_000L)
     }
 
     private fun advanceTownBuilderVillage() {
         if (!running || !townBuilderInProgress) return
+        val current = builderVillages.getOrNull(builderVillageIndex)
+        logEvent("Town Builder: selesai proses ${current?.second ?: "Village"}; lanjut village berikutnya")
         builderStage = "TOWN_ADVANCING"
         pendingUpgradeUrl = ""
         pendingUpgradeCosts = longArrayOf(0L,0L,0L,0L)
@@ -2247,6 +2291,16 @@ private fun clickTransferSelected() {
 
     private fun finishTownBuilderCycle() {
         debugTrace("ENTER finishTownBuilderCycle")
+        val now = System.currentTimeMillis()
+        if (townBuilderCycleStartedAt > 0L) {
+            val duration = (now - townBuilderCycleStartedAt).coerceAtLeast(0L)
+            getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                .putLong("town_cycle_duration_ms", duration)
+                .putLong("town_cycle_started_at", 0L)
+                .apply()
+            logEvent("Town Builder: waktu proses ${formatDuration(duration)}")
+            townBuilderCycleStartedAt = 0L
+        }
         townBuilderInProgress = false
         builderInProgress = false
         builderVillages.clear()
@@ -2255,6 +2309,7 @@ private fun clickTransferSelected() {
         pendingUpgradeUrl = ""
         pendingUpgradeCosts = longArrayOf(0L,0L,0L,0L)
         builderStage = "IDLE"
+        logEvent("Town Builder: END")
         logEvent("CICLE END")
         scheduleNextRandomRun()
         updateNotification("Next Run ${timeFormat.format(Date(nextAt))} | dalam ${formatDuration((nextAt - System.currentTimeMillis()).coerceAtLeast(0L))}")
@@ -2280,7 +2335,7 @@ private fun clickTransferSelected() {
             if(result.contains("clicked") || result.contains("navigated")){
                 val name=builderVillages.getOrNull(builderVillageIndex)?.second ?: "Village ${builderVillageIndex+1}"
                 builderStage = "TOWN_ADVANCING"
-                logEvent("Village $name Upgrade Success")
+                logEvent("Town Village $name Upgrade Success")
                 handler.postDelayed({ advanceTownBuilderVillage() },1200L)
             } else {
                 inventoryUseAttempt=0
@@ -2295,7 +2350,7 @@ private fun clickTransferSelected() {
         if (!running || !builderInProgress || pendingUpgradeUrl.isBlank()) return
         inventoryUseAttempt++
         if (inventoryUseAttempt > 5) {
-            logEvent("Resource Builder: gagal menggunakan resource Hero setelah 5 percobaan")
+            logEvent(if (townBuilderInProgress) "Town Builder: gagal menggunakan resource Hero setelah 5 percobaan" else "Resource Builder: gagal menggunakan resource Hero setelah 5 percobaan")
             pendingUpgradeUrl = ""
             goToNextBuilderVillage()
             return
@@ -2419,7 +2474,7 @@ private fun clickTransferSelected() {
                 result == "no_amount_inputs" || result == "no_confirm" -> {
                     if (inventoryUseAttempt < 5) handler.postDelayed({ fillHeroResourceDialog() }, 800)
                     else {
-                        logEvent("Resource Builder: dialog penggunaan resource Hero tidak dikenali")
+                        logEvent(if (townBuilderInProgress) "Town Builder: dialog resource Hero tidak dikenali" else "Resource Builder: dialog penggunaan resource Hero tidak dikenali")
                         pendingUpgradeUrl = ""
                         goToNextBuilderVillage()
                     }
@@ -2534,10 +2589,6 @@ private fun clickTransferSelected() {
 
     private fun finishResourceBuilderCycle() {
         debugTrace("ENTER finishResourceBuilderCycle")
-        if (!townBuilderInProgress && townBuilderEnabled) {
-            startTownBuilderCycle()
-            return
-        }
         val now = System.currentTimeMillis()
         if (resourceBuilderCycleStartedAt > 0L) {
             val duration = (now - resourceBuilderCycleStartedAt).coerceAtLeast(0L)
@@ -2547,6 +2598,10 @@ private fun clickTransferSelected() {
                 .apply()
             logEvent("Resource Builder: waktu proses ${formatDuration(duration)}")
             resourceBuilderCycleStartedAt = 0L
+        }
+        if (!townBuilderInProgress && townBuilderEnabled) {
+            startTownBuilderCycle()
+            return
         }
         builderInProgress = false
         builderVillages.clear()
@@ -2847,6 +2902,11 @@ private fun clickTransferSelected() {
             edit.putLong("resource_cycle_started_at", 0L)
             resourceBuilderCycleStartedAt = 0L
         }
+        if (townBuilderCycleStartedAt > 0L) {
+            edit.putLong("town_cycle_duration_ms", (now - townBuilderCycleStartedAt).coerceAtLeast(0L))
+            edit.putLong("town_cycle_started_at", 0L)
+            townBuilderCycleStartedAt = 0L
+        }
         edit.apply()
     }
 
@@ -3060,6 +3120,8 @@ private fun clickTransferSelected() {
             message.startsWith("Village ") && message.endsWith(" Upgrade Success") -> message
             message.startsWith("Village ") && message.endsWith(" no upgrade") -> message
             message.startsWith("Village ") && message.contains(" Updated min L") -> message
+            message.startsWith("Town Builder:") -> message
+            message.startsWith("Town Village ") -> message
             message.startsWith("Next Run: ") -> message
             message == "REFRESH VILLAGE START" -> "REFRESH VILLAGE START"
             message == "REFRESH VILLAGE END" -> "REFRESH VILLAGE END"

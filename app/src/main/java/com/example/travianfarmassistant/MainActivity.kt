@@ -64,12 +64,15 @@ class MainActivity : Activity() {
     private lateinit var nextRun: TextView
     private lateinit var farmCycleTime: TextView
     private lateinit var resourceCycleTime: TextView
+    private lateinit var townCycleTime: TextView
     private lateinit var serverInput: EditText
     private lateinit var usernameInput: EditText
     private lateinit var passwordInput: EditText
     private lateinit var refreshVillageLinkPreview: TextView
     private lateinit var resourceBuilderVillageLinkPreview: TextView
     private lateinit var villageDatabaseView: TextView
+    private lateinit var dbTab: ScrollView
+    private lateinit var dbTabButton: Button
     private lateinit var villageChecklist: LinearLayout
     private var loadedVillages = linkedMapOf<String, String>()
 
@@ -281,8 +284,6 @@ class MainActivity : Activity() {
     // Link village disimpan saat discovery agar Builder dapat mengikuti link village yang sama.
     private val villageScanCollectedLinks = linkedMapOf<String, String>()
     private var villageScanCollectInFlight = false
-    // Token per langkah scan agar callback halaman/redirect lama diabaikan.
-    private var villageScanStepToken = 0L
 
     private val handler = Handler(Looper.getMainLooper())
     private var running = false
@@ -333,9 +334,11 @@ class MainActivity : Activity() {
         farmTabButton = findViewById(R.id.farmTabButton)
         capacityTabButton = findViewById(R.id.capacityTabButton)
         logTabButton = findViewById(R.id.logTabButton)
+        dbTabButton = findViewById(R.id.dbTabButton)
         capacityOverview = findViewById(R.id.capacityOverview)
         capacityStatus = findViewById(R.id.capacityStatus)
         logOverview = findViewById(R.id.logOverview)
+        dbTab = findViewById(R.id.dbTab)
         recentLogs = findViewById(R.id.recentLogs)
         botToggle = findViewById(R.id.botToggle)
         setupTabs()
@@ -354,6 +357,7 @@ class MainActivity : Activity() {
         nextRun = findViewById(R.id.nextRun)
         farmCycleTime = findViewById(R.id.farmCycleTime)
         resourceCycleTime = findViewById(R.id.resourceCycleTime)
+        townCycleTime = findViewById(R.id.townCycleTime)
         webView = findViewById(R.id.webView)
         pruneLogs()
         handler.postDelayed(logCleanup, 60 * 60 * 1000L)
@@ -453,13 +457,8 @@ class MainActivity : Activity() {
                 if (villageScanActive) {
                     // Satu onPageFinished bisa terpanggil beberapa kali (redirect/hash/consent).
                     // Jangan menembakkan evaluateJavascript scan berulang secara bersamaan.
-                    val scanToken = villageScanStepToken
-                    val scanIndex = villageScanIndex
                     handler.postDelayed({
                         if (!villageScanActive) return@postDelayed
-                        // Callback dari halaman/redirect village sebelumnya tidak boleh
-                        // memicu scan untuk index yang baru.
-                        if (scanToken != villageScanStepToken || scanIndex != villageScanIndex) return@postDelayed
                         val target = villageScanTargets.getOrNull(villageScanIndex)
                         if (target != null) {
                             if (!villageScanCollectInFlight) collectCurrentVillageData()
@@ -1015,8 +1014,32 @@ class MainActivity : Activity() {
             }
             val spinner = Spinner(this).apply {
                 layoutParams = LinearLayout.LayoutParams(170, LinearLayout.LayoutParams.WRAP_CONTENT)
-                adapter = android.widget.ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_item, townOptions.map { it.second }).also {
-                    it.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+                adapter = object : android.widget.ArrayAdapter<String>(
+                    this@MainActivity,
+                    android.R.layout.simple_spinner_item,
+                    townOptions.map { it.second }
+                ) {
+                    override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
+                        val tv = (convertView as? TextView) ?: TextView(this@MainActivity)
+                        tv.text = getItem(position).orEmpty()
+                        tv.setTextColor(Color.WHITE)
+                        tv.textSize = 13f
+                        tv.gravity = android.view.Gravity.CENTER_VERTICAL
+                        tv.setSingleLine(true)
+                        tv.ellipsize = android.text.TextUtils.TruncateAt.END
+                        tv.setPadding(10, 6, 8, 6)
+                        return tv
+                    }
+
+                    override fun getDropDownView(position: Int, convertView: View?, parent: ViewGroup): View {
+                        val tv = (convertView as? TextView) ?: TextView(this@MainActivity)
+                        tv.text = getItem(position).orEmpty()
+                        tv.setTextColor(Color.WHITE)
+                        tv.textSize = 14f
+                        tv.setPadding(12, 10, 12, 10)
+                        tv.setSingleLine(true)
+                        return tv
+                    }
                 }
                 val current = record?.linkTown?.trim().orEmpty().ifBlank { "-" }
                 setSelection(townOptions.indexOfFirst { it.first == current }.coerceAtLeast(0))
@@ -1220,7 +1243,6 @@ class MainActivity : Activity() {
         villageScanCollectedTargets.clear()
         villageScanCollectedLinks.clear()
         villageScanCollectInFlight = false
-        villageScanStepToken = 0L
         resetVillageResourceDataForRefresh()
         clearSavedResourceBuilderTargets()
 
@@ -1449,8 +1471,6 @@ class MainActivity : Activity() {
             return
         }
 
-        // Satu token untuk satu village. Callback lama otomatis gugur.
-        villageScanStepToken++
         val (id, name) = villageScanTargets[villageScanIndex]
 
         val progress = "${villageScanIndex + 1}/${villageScanTargets.size}"
@@ -1581,7 +1601,6 @@ class MainActivity : Activity() {
         val target = villageScanTargets.getOrNull(villageScanIndex) ?: return
         val expectedId = target.first
         val expectedIdJson = JSONObject.quote(expectedId)
-        val scanToken = villageScanStepToken
         villageScanCollectInFlight = true
 
         val js = """
@@ -1609,7 +1628,7 @@ class MainActivity : Activity() {
 
                 if (currentId !== expectedId) {
                     AndroidFarm.onVillageScanResult(JSON.stringify({
-                        scanToken:$scanToken, notReady:true, reason:'WRONG_VILLAGE', id:currentId, expectedId,
+                        notReady:true, reason:'WRONG_VILLAGE', id:currentId, expectedId,
                         url, activeId, activeName, pageTitle:document.title || '',
                         readyState:document.readyState
                     }));
@@ -1836,7 +1855,7 @@ class MainActivity : Activity() {
                 // jika 18 field sudah tersedia; resource akan disimpan bila lengkap.
                 if (!container || !resourceFieldsComplete) {
                     AndroidFarm.onVillageScanResult(JSON.stringify({
-                        scanToken:$scanToken, notReady:true, reason:'FIELDS_NOT_READY', id:currentId, expectedId,
+                        notReady:true, reason:'FIELDS_NOT_READY', id:currentId, expectedId,
                         url, activeId, activeName, fieldCount:uniqueLevels.length,
                         resourceComplete, resourceContainer:!!container, resources,
                         lowestResource, debugFields:debugFields.slice(0,12)
@@ -1852,7 +1871,7 @@ class MainActivity : Activity() {
                 );
 
                 AndroidFarm.onVillageScanResult(JSON.stringify({
-                    scanToken:$scanToken, id:expectedId, name:pageName, minLevel:(lowestResource?.level ?? Math.min(...uniqueLevels)),
+                    id:expectedId, name:pageName, minLevel:(lowestResource?.level ?? Math.min(...uniqueLevels)),
                     fields:uniqueLevels, fieldNodeCount:uniqueFields, resourceFieldCount:uniqueFields,
                     debugFieldCount:debugFields.length, debugFields,
                     resourceContainer:true, activeId, activeName, url, resources, lowestResource
@@ -1867,9 +1886,6 @@ class MainActivity : Activity() {
         if (!villageScanActive) return
 
         val json = runCatching { JSONObject(rawJson) }.getOrNull()
-        // Hanya hasil dari langkah scan yang sedang aktif boleh mengubah index.
-        val resultToken = json?.optLong("scanToken", -1L) ?: -1L
-        if (resultToken >= 0L && resultToken != villageScanStepToken) return
 
         if (json?.optBoolean("notReady", false) == true) {
             villageScanCollectInFlight = false
@@ -1889,9 +1905,7 @@ class MainActivity : Activity() {
                             "url=${json.optString("url").ifBlank { "-" }}"
                     )
                 }
-                handler.postDelayed({
-                    if (villageScanActive && resultToken == villageScanStepToken) collectCurrentVillageData()
-                }, 700)
+                handler.postDelayed({ if (villageScanActive) collectCurrentVillageData() }, 700)
             } else {
                 // Satu village gagal tidak boleh mengunci seluruh scanner.
                 val (_, name) = villageScanTargets[villageScanIndex]
@@ -1899,15 +1913,10 @@ class MainActivity : Activity() {
                     "UI: [${villageScanIndex + 1}/${villageScanTargets.size}] " +
                         "$name timeout; village dilewati"
                 )
-                val nextIndex = villageScanIndex + 1
-                villageScanIndex = nextIndex
+                villageScanIndex++
                 villageScanDataRetry = 0
                 villageScanCollectInFlight = false
-                handler.postDelayed({
-                    if (villageScanActive && resultToken == villageScanStepToken && villageScanIndex == nextIndex) {
-                        visitNextVillageForScan()
-                    }
-                }, 500)
+                handler.postDelayed({ visitNextVillageForScan() }, 500)
             }
             return
         }
@@ -1936,22 +1945,14 @@ class MainActivity : Activity() {
         val scannedVillageLink = "${normalizeServer(serverInput.text.toString())}/dorf1.php?newdid=$id"
         val existingRecord = loadVillageDataRecords().firstOrNull { it.id == id }
 
-        // Village tetap disimpan walaupun resource terendah sudah L10+.
-        // Resource Builder cukup melewati target resource tersebut, sedangkan Town Builder
-        // tetap membutuhkan record village dan Link Town.
+        // Village dengan resource terendah L10+ tidak perlu masuk database lagi.
+        // Tujuannya mengurangi pekerjaan Resource Builder pada siklus berikutnya.
         if (minLevel >= 10 || (minLevel < 0 && lowestResourceLevel >= 10)) {
-            upsertVillageDataRecord(
-                id = id,
-                namaVillage = name,
-                linkVillage = scannedVillageLink,
-                linkResource = lowestResourceHref.takeIf { it.isNotBlank() },
-                resourceId = lowestResourceId.takeIf { it.isNotBlank() },
-                resourceGid = lowestResourceGid.takeIf { it.isNotBlank() },
-                minLvl = minLevel,
-                isChecklist = existingRecord?.isChecklist
-            )
-            villageMinLevels[id] = minLevel
-            logEvent("Village $name Updated min L$minLevel")
+            val before = loadVillageDataRecords()
+            val after = before.filterNot { it.id == id }
+            if (after.size != before.size) saveVillageDataRecords(after)
+            villageMinLevels.remove(id)
+            logEvent("UI: [$id] ${name} dihapus dari DATABASE VILLAGE karena MinLvl=L$minLevel (>=10)")
         } else {
             upsertVillageDataRecord(
                 id = id,
@@ -2056,13 +2057,8 @@ class MainActivity : Activity() {
                 if (resourceText.isNotBlank()) "; $resourceText" else ""
         )
 
-        val nextIndex = villageScanIndex + 1
-        villageScanIndex = nextIndex
-        handler.postDelayed({
-            if (villageScanActive && resultToken == villageScanStepToken && villageScanIndex == nextIndex) {
-                visitNextVillageForScan()
-            }
-        }, 250)
+        villageScanIndex++
+        handler.postDelayed({ visitNextVillageForScan() }, 250)
     }
 
     private fun finishVillageScan() {
@@ -2903,11 +2899,13 @@ class MainActivity : Activity() {
         fun showTab(tab: View) {
             farmTab.visibility = if (tab === farmTab) View.VISIBLE else View.GONE
             capacityTab.visibility = if (tab === capacityTab) View.VISIBLE else View.GONE
+            dbTab.visibility = if (tab === dbTab) View.VISIBLE else View.GONE
             logTab.visibility = if (tab === logTab) View.VISIBLE else View.GONE
 
             handler.post {
                 when {
                     tab === capacityTab -> renderCapacityOverview()
+                    tab === dbTab -> updateVillageDatabaseView()
                     tab === logTab -> refreshLogOverview()
                 }
             }
@@ -2915,6 +2913,7 @@ class MainActivity : Activity() {
         addLogControlsIfNeeded()
         farmTabButton.setOnClickListener { showTab(farmTab) }
         capacityTabButton.setOnClickListener { showTab(capacityTab) }
+        dbTabButton.setOnClickListener { showTab(dbTab) }
         logTabButton.setOnClickListener { showTab(logTab) }
         showTab(farmTab)
     }
@@ -3149,10 +3148,13 @@ class MainActivity : Activity() {
         val now = System.currentTimeMillis()
         val farmStart = prefs.getLong("farm_cycle_started_at", 0L)
         val resourceStart = prefs.getLong("resource_cycle_started_at", 0L)
+        val townStart = prefs.getLong("town_cycle_started_at", 0L)
         val farmDuration = if (farmStart > 0L) now - farmStart else prefs.getLong("farm_cycle_duration_ms", 0L)
         val resourceDuration = if (resourceStart > 0L) now - resourceStart else prefs.getLong("resource_cycle_duration_ms", 0L)
+        val townDuration = if (townStart > 0L) now - townStart else prefs.getLong("town_cycle_duration_ms", 0L)
         farmCycleTime.text = "Waktu Siklus Farm List: ${formatDuration(farmDuration)}"
         resourceCycleTime.text = "Waktu Siklus Resource Builder: ${formatDuration(resourceDuration)}"
+        townCycleTime.text = "Waktu Siklus Town Builder: ${formatDuration(townDuration)}"
     }
 
     private fun updateCountdown() {
