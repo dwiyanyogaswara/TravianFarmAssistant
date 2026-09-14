@@ -735,7 +735,7 @@ class FarmAutomationService : Service() {
                 loginRetryCount = 0
                 if (pendingStartAll) {
                     startAllAttempt = 0
-                    handler.postDelayed({ clickStartAllFarmLists() }, 1200)
+                    handler.postDelayed({ clickStartAllFarmLists() }, 3000)
                 }
                 return@acceptCookiesIfPresent
             }
@@ -986,14 +986,10 @@ class FarmAutomationService : Service() {
                 };
                 const dispatch = btn => {
                     btn.scrollIntoView({block:'center'});
-                    // Gunakan native HTMLElement.click() terlebih dahulu. Beberapa
-                    // handler Travian/jQuery tidak bereaksi terhadap MouseEvent buatan.
-                    try { btn.click(); } catch (_) {}
-                    // Event fallback untuk markup/handler lama.
-                    try {
-                        btn.dispatchEvent(new MouseEvent('mousedown', {bubbles:true, cancelable:true, view:window}));
-                        btn.dispatchEvent(new MouseEvent('mouseup', {bubbles:true, cancelable:true, view:window}));
-                    } catch (_) {}
+                    // Gunakan native HTMLElement.click() saja. Jangan menambahkan
+                    // mousedown/mouseup buatan karena handler Travian dapat menerima
+                    // dua jalur event dan menyebabkan dispatch tidak konsisten.
+                    try { return btn.click() !== false; } catch (_) { return false; }
                 };
                 const selectors = [
                     '#rallyPointFarmList button.startAllFarmLists',
@@ -1008,8 +1004,8 @@ class FarmAutomationService : Service() {
                     if (btn) {
                         const before = statusCount();
                         const beforeReady = readyCount();
-                        dispatch(btn);
-                        return JSON.stringify({state:'clicked', before, beforeReady, selector});
+                        const clicked = dispatch(btn);
+                        return JSON.stringify({state: clicked ? 'clicked' : 'click-error', before, beforeReady, selector});
                     }
                 }
                 const candidates = [...document.querySelectorAll('button,input[type=button],input[type=submit],a,[role=button]')];
@@ -1021,8 +1017,8 @@ class FarmAutomationService : Service() {
                 if (textBtn) {
                     const before = statusCount();
                     const beforeReady = readyCount();
-                    dispatch(textBtn);
-                    return JSON.stringify({state:'clicked', before, beforeReady, selector:'text'});
+                    const clicked = dispatch(textBtn);
+                    return JSON.stringify({state: clicked ? 'clicked' : 'click-error', before, beforeReady, selector:'text'});
                 }
                 return JSON.stringify({state:'not-found', before:statusCount(), beforeReady:readyCount()});
             })();
@@ -1030,7 +1026,9 @@ class FarmAutomationService : Service() {
         automationWebView()?.evaluateJavascript(js) { raw ->
             val result = raw.orEmpty().trim('"').replace("\\\"", "\"")
             if (result.contains("\"state\":\"clicked\"")) {
-                pendingStartAll = false
+                // Jangan langsung menganggap klik sebagai SUCCESS. Simpan kondisi
+                // sebelum klik, lalu verifikasi perubahan DOM/status Travian terlebih dahulu.
+                pendingStartAll = true
                 startAllAttempt = 0
                 raidVerificationAttempt = 0
                 farmListProgressObserved = false
@@ -1038,17 +1036,8 @@ class FarmAutomationService : Service() {
                 farmListStableChecks = 0
                 fallbackFarmListMode = false
                 raidCountBeforeStartAll = Regex("\"before\":(\\d+)").find(result)?.groupValues?.get(1)?.toIntOrNull() ?: 0
-                farmListBeforeReady = Regex("\"readyBefore\":(\\d+)").find(result)?.groupValues?.get(1)?.toIntOrNull() ?: 0
-                val now = timeFormat.format(Date())
-                getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString("last_run", now).apply()
-                logEvent("Click Send All Farmlist Success")
-                updateNotification("Farm List — menunggu 1 menit agar semua raid terkirim")
-                
-                // Send All adalah satu aksi dispatch. Tidak perlu polling status tombol
-                // berulang-ulang karena tombol bisa tetap aktif walaupun semua request
-                // sudah masuk. Beri Travian 60 detik untuk menyelesaikan seluruh dispatch,
-                // lalu lanjut ke Resource Builder.
-                handler.postDelayed({ finishFarmListAfterOneMinute() }, 60_000L)
+                farmListBeforeReady = Regex("\"beforeReady\":(\\d+)").find(result)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+                handler.postDelayed({ verifyRaidDispatch() }, 1500L)
             } else if (startAllAttempt < 10) {
                 startAllAttempt++
                 handler.postDelayed({ clickStartAllFarmLists() }, 1000)
@@ -1086,11 +1075,8 @@ class FarmAutomationService : Service() {
         debugTrace("ENTER verifyRaidDispatch")
         if (!running) return
 
-        // Farm List adalah aksi dispatch, bukan proses yang harus ditunggu sampai
-        // semua tombol Start menjadi disabled. Pada Travian tombol Start sering tetap
-        // aktif walaupun request raid sudah berhasil dikirim. Verifikasi lama bisa
-        // polling 20x + fallback + reload sampai watchdog 5 menit dan membuat
-        // Resource Builder tidak pernah kebagian waktu.
+        // Setelah Send All diklik, tunggu bukti dari DOM bahwa Travian benar-benar
+        // memproses dispatch. Klik DOM saja tidak cukup untuk menyatakan SUCCESS.
         val js = """
             (() => {
                 const visible = el => {
@@ -1110,7 +1096,7 @@ class FarmAutomationService : Service() {
                 }
                 const allText = norm(document.querySelector('#rallyPointFarmList')?.innerText || '');
                 const busy = /sending|loading|processing|mengirim|memproses/.test(allText);
-                return JSON.stringify({total, wrappers, ready, busy});
+                return JSON.stringify({total, wrappers, ready, busy, readyState:document.readyState});
             })();
         """.trimIndent()
 
@@ -1125,30 +1111,28 @@ class FarmAutomationService : Service() {
                 farmListProgressObserved = true
             }
 
-            // Beri AJAX Travian waktu singkat untuk mulai, tetapi jangan pernah
-            // menahan siklus sampai menit ke-5 hanya karena tombol Start tetap aktif.
             val elapsedChecks = raidVerificationAttempt
-            val dispatchSettled = wrappers > 0 && !busy &&
-                (farmListProgressObserved || elapsedChecks >= 4)
+            val evidence = current > raidCountBeforeStartAll || ready < farmListBeforeReady
 
-            if (dispatchSettled || elapsedChecks >= 6) {
-                val sent = (current - raidCountBeforeStartAll).coerceAtLeast(0)
-                logEvent(
-                    "Farm List selesai dispatch: $sent raid terdeteksi; " +
-                        "tombol Start aktif=$ready; verifikasi=${elapsedChecks + 1}x — lanjut Resource Builder"
-                )
+            if (wrappers > 0 && evidence) {
                 pendingStartAll = false
                 fallbackFarmListMode = false
                 farmListCycleComplete = true
-                maybeStartResourceBuilderAfterRefresh()
-            } else {
+                val now = timeFormat.format(Date())
+                getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString("last_run", now).apply()
+                logEvent("Click Send All Farmlist Success")
+                updateNotification("Farm List — raid berhasil diproses, menunggu penyelesaian")
+                handler.postDelayed({ finishFarmListAfterOneMinute() }, 60_000L)
+            } else if (elapsedChecks < 14) {
                 raidVerificationAttempt++
-                logEvent(
-                    "Farm List verifikasi ${raidVerificationAttempt}/6; raid=$current; " +
-                        "tombol Start aktif=$ready; busy=$busy; progress=${if (farmListProgressObserved) "YA" else "BELUM"}"
-                )
-                updateNotification("Farm List — dispatch ${raidVerificationAttempt}/6")
-                handler.postDelayed({ verifyRaidDispatch() }, 1000)
+                handler.postDelayed({ verifyRaidDispatch() }, 1000L)
+            } else {
+                pendingStartAll = false
+                fallbackFarmListMode = false
+                logEvent("Send All Farmlist Failed")
+                updateNotification("Farm List — Send All tidak terverifikasi")
+                farmListCycleComplete = true
+                maybeStartResourceBuilderAfterRefresh()
             }
         }
     }
@@ -3130,6 +3114,7 @@ private fun clickTransferSelected() {
             when {
                 message == "CICLE START" -> "CICLE START"
                 message == "Click Send All Farmlist Success" -> "Click Send All Farmlist Success"
+                message == "Send All Farmlist Failed" -> "Send All Farmlist Failed"
                 message == "CICLE END" -> "CICLE END"
                 message.startsWith("Village ") && message.contains(" Upgrade to Level ") && message.endsWith(" Success") -> message
                 message.startsWith("Village ") && message.endsWith(" Upgrade Success") -> message
