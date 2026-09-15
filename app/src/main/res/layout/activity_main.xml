@@ -19,15 +19,6 @@
             android:layout_height="wrap_content"
             android:layout_weight="1"/>
         <Button
-            android:id="@+id/celebrationTabButton"
-            android:text="🎉 Celebration"
-            android:backgroundTint="#EF6C00"
-            android:textColor="#FFFFFF"
-            android:textSize="12sp"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"/>
-        <Button
             android:id="@+id/capacityTabButton"
             android:text="📊 Capacity Overview"
             android:backgroundTint="#1565C0"

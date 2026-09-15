@@ -258,7 +258,6 @@ class MainActivity : Activity() {
     private lateinit var capacityTab: View
     private lateinit var logTab: View
     private lateinit var farmTabButton: Button
-    private lateinit var celebrationTabButton: Button
     private lateinit var capacityTabButton: Button
     private lateinit var logTabButton: Button
     private lateinit var capacityOverview: LinearLayout
@@ -333,7 +332,6 @@ class MainActivity : Activity() {
         capacityTab = findViewById(R.id.capacityTab)
         logTab = findViewById(R.id.logTab)
         farmTabButton = findViewById(R.id.farmTabButton)
-        celebrationTabButton = findViewById(R.id.celebrationTabButton)
         capacityTabButton = findViewById(R.id.capacityTabButton)
         logTabButton = findViewById(R.id.logTabButton)
         dbTabButton = findViewById(R.id.dbTabButton)
@@ -344,11 +342,6 @@ class MainActivity : Activity() {
         recentLogs = findViewById(R.id.recentLogs)
         botToggle = findViewById(R.id.botToggle)
         setupTabs()
-        when (intent.getStringExtra("openTab")) {
-            "capacity" -> capacityTabButton.performClick()
-            "db" -> dbTabButton.performClick()
-            "log" -> logTabButton.performClick()
-        }
         renderCapacityOverview()
         refreshLogOverview()
 
@@ -2926,9 +2919,6 @@ class MainActivity : Activity() {
         }
         addLogControlsIfNeeded()
         farmTabButton.setOnClickListener { showTab(farmTab) }
-        celebrationTabButton.setOnClickListener {
-            startActivity(android.content.Intent(this, CelebrationActivity::class.java))
-        }
         capacityTabButton.setOnClickListener { showTab(capacityTab) }
         dbTabButton.setOnClickListener { showTab(dbTab) }
         logTabButton.setOnClickListener { showTab(logTab) }

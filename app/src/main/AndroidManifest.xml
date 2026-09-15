@@ -16,7 +16,6 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Long-running Travian automation and scheduled background work" />
         </service>
-        <activity android:name=".CelebrationActivity" android:exported="false"/>
         <activity android:name=".LogActivity" android:exported="false"/>
         <activity android:name=".MainActivity" android:exported="true">
             <intent-filter>
