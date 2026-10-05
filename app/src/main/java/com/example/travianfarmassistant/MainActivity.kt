@@ -23,6 +23,7 @@ import javax.crypto.spec.GCMParameterSpec
 import java.security.KeyStore
 import android.widget.*
 import android.graphics.Color
+import android.graphics.drawable.GradientDrawable
 import android.text.SpannableString
 import android.text.Spanned
 import android.view.View
@@ -65,6 +66,7 @@ class MainActivity : Activity() {
     private lateinit var farmCycleTime: TextView
     private lateinit var resourceCycleTime: TextView
     private lateinit var townCycleTime: TextView
+    private lateinit var holdCelebrationCycleTime: TextView
     private lateinit var serverInput: EditText
     private lateinit var usernameInput: EditText
     private lateinit var passwordInput: EditText
@@ -90,7 +92,8 @@ class MainActivity : Activity() {
         val resourceId: String,
         val resourceGid: String,
         val minLvl: Int,
-        val linkTown: String
+        val linkTown: String,
+        val isHoldCelebration: Boolean
     )
 
     private fun currentServerBase(): String {
@@ -141,7 +144,8 @@ class MainActivity : Activity() {
                     resourceId = item.optString("ResourceId").trim(),
                     resourceGid = item.optString("ResourceGid").trim(),
                     minLvl = item.optInt("MinLvl", -1),
-                    linkTown = rebaseTravianUrl(item.optString("LinkTown", "-").trim().ifBlank { "-" })
+                    linkTown = rebaseTravianUrl(item.optString("LinkTown", "-").trim().ifBlank { "-" }),
+                    isHoldCelebration = item.optBoolean("IsHoldCelebration", false)
                 )
             )
         }
@@ -162,6 +166,7 @@ class MainActivity : Activity() {
                 put("ResourceGid", item.resourceGid)
                 put("MinLvl", item.minLvl)
                 put("LinkTown", rebaseTravianUrl(item.linkTown))
+                put("IsHoldCelebration", item.isHoldCelebration)
             })
         }
         getSharedPreferences("config", MODE_PRIVATE).edit()
@@ -179,7 +184,8 @@ class MainActivity : Activity() {
         resourceGid: String? = null,
         minLvl: Int? = null,
         linkTown: String? = null,
-        isChecklist: Boolean? = null
+        isChecklist: Boolean? = null,
+        isHoldCelebration: Boolean? = null
     ) {
         debugTrace("ENTER upsertVillageDataRecord")
         val cleanId = id.trim()
@@ -196,9 +202,21 @@ class MainActivity : Activity() {
             resourceId = resourceId?.trim()?.takeIf { it.isNotBlank() } ?: old?.resourceId.orEmpty(),
             resourceGid = resourceGid?.trim()?.takeIf { it.isNotBlank() } ?: old?.resourceGid.orEmpty(),
             minLvl = minLvl ?: old?.minLvl ?: -1,
-            linkTown = linkTown?.trim()?.takeIf { it.isNotBlank() } ?: old?.linkTown ?: "-"
+            linkTown = linkTown?.trim()?.takeIf { it.isNotBlank() } ?: old?.linkTown ?: "-",
+            isHoldCelebration = isHoldCelebration ?: old?.isHoldCelebration ?: false
         )
         if (index >= 0) records[index] = updated else records.add(updated)
+        saveVillageDataRecords(records)
+    }
+
+    private fun updateVillageHoldCelebrationData(id: String, checked: Boolean) {
+        debugTrace("ENTER updateVillageHoldCelebrationData")
+        val cleanId = id.trim()
+        if (cleanId.isBlank()) return
+        val records = loadVillageDataRecords()
+        val index = records.indexOfFirst { it.id == cleanId }
+        if (index < 0) return
+        records[index] = records[index].copy(isHoldCelebration = checked)
         saveVillageDataRecords(records)
     }
 
@@ -294,6 +312,7 @@ class MainActivity : Activity() {
     private var loginRetryCount = 0
     private var reloginRequested = false
     private var farmListRequested = false
+    private var logoutCleanupInProgress = false
     private var pendingStartAll = false
     private var startAllAttempt = 0
     private var pendingUsername = ""
@@ -358,6 +377,7 @@ class MainActivity : Activity() {
         farmCycleTime = findViewById(R.id.farmCycleTime)
         resourceCycleTime = findViewById(R.id.resourceCycleTime)
         townCycleTime = findViewById(R.id.townCycleTime)
+        holdCelebrationCycleTime = findViewById(R.id.holdCelebrationCycleTime)
         webView = findViewById(R.id.webView)
         pruneLogs()
         handler.postDelayed(logCleanup, 60 * 60 * 1000L)
@@ -372,7 +392,10 @@ class MainActivity : Activity() {
         restoreResourceSnapshots(prefs)
         logEvent("Aplikasi v4.14.15 dimulai")
         val savedCredential = CredentialDatabase(this).read()
-        serverInput.setText(savedCredential?.server ?: "https://ts20.x2.europe.travian.com")
+        // Tampilkan template server agar user cukup mengganti bagian host, misalnya:
+        // https://ts20.x2.europe.travian.com
+        val defaultServer = "https://.travian.com"
+        serverInput.setText(savedCredential?.server?.takeIf { it.isNotBlank() } ?: defaultServer)
         usernameInput.setText(savedCredential?.username ?: "")
         passwordInput.setText(savedCredential?.password ?: "")
         if (savedCredential == null) {
@@ -595,12 +618,11 @@ class MainActivity : Activity() {
             return false
         }
 
-        // Sinkronkan IsChecklist di database village menjadi sumber data Builder.
-        val selectedNow = selectedVillageIds()
-        val currentVillageRecords = loadVillageDataRecords()
-        if (currentVillageRecords.isNotEmpty()) {
-            saveVillageDataRecords(currentVillageRecords.map { it.copy(isChecklist = selectedNow.contains(it.id)) })
-        }
+        // PENTING: Toggle BOT hanya memulai service.
+        // Jangan menulis ulang IsChecklist dari UI di sini karena saat kontrol
+        // dikunci/dirender ulang state checkbox UI bisa sementara kosong dan
+        // akhirnya mengubah checklist database menjadi unchecked.
+        // FarmAutomationService akan membaca IsChecklist langsung dari database.
 
         getSharedPreferences("config", MODE_PRIVATE).edit()
             .putLong("interval_min_minutes", minMinutes)
@@ -674,73 +696,106 @@ class MainActivity : Activity() {
     private fun confirmLogoutAndClearDatabase() {
         debugTrace("ENTER confirmLogoutAndClearDatabase")
         android.app.AlertDialog.Builder(this)
-            .setTitle("Logout dan hapus database?")
-            .setMessage("Bot akan dihentikan, session Travian akan di-logout, credential dan DATABASE VILLAGE/Resource Builder akan dihapus.")
+            .setTitle("Logout dan hapus semua data?")
+            .setMessage("Bot akan dihentikan dan seluruh data aplikasi akan dihapus: Village, Resource Builder, Capacity Overview, konfigurasi, credential, session Travian, cache WebView, dan log.")
             .setNegativeButton("BATAL", null)
-            .setPositiveButton("LOGOUT & HAPUS") { _, _ ->
-                logEvent("Tombol LOGOUT ditekan — menghentikan bot dan menghapus database")
+            .setPositiveButton("LOGOUT & HAPUS SEMUA") { _, _ ->
+                logoutCleanupInProgress = true
+                logEvent("LOGOUT & HAPUS SEMUA dimulai")
 
-                // Hentikan background automation terlebih dahulu.
-                if (running || getSharedPreferences("config", MODE_PRIVATE).getBoolean("service_running", false)) {
-                    stopScheduler()
-                }
+                val logoutJs = """
+                    (() => {
+                        try {
+                            const el = document.querySelector(
+                                'a.layoutButton.logout[onclick*="auth/logout"], a#button6aaa328d7a848'
+                            );
+                            if (el) { el.click(); return 'clicked'; }
+                            return 'not_found';
+                        } catch (e) { return 'error'; }
+                    })();
+                """.trimIndent()
 
-                // Hapus credential database terenkripsi.
-                runCatching { CredentialDatabase(this).clear() }
+                runCatching { webView.evaluateJavascript(logoutJs, null) }
+                runCatching { FarmAutomationService.requestTravianLogout() }
 
-                // Hapus seluruh data village/resource-builder yang tersimpan di config.
-                getSharedPreferences("config", MODE_PRIVATE).edit()
-                    .remove(villageDataPrefsKey)
-                    .remove("resource_builder_targets_json")
-                    .remove("resource_builder_villages_json")
-                    .remove("resource_builder_selected_villages")
-                    .remove("resource_builder_selection_configured")
-                    .remove("resource_snapshots_json")
-                    .remove("service_running")
-                    .remove("cycle_active")
-                    .remove("next_run_at")
-                    .remove("current_cycle_number")
-                    .remove("farm_cycle_started_at")
-                    .remove("resource_cycle_started_at")
-                    .remove("farm_cycle_duration_ms")
-                    .remove("resource_cycle_duration_ms")
-                    .apply()
-
-                loadedVillages.clear()
-                villageScanActive = false
-                villageScanTargets.clear()
-                villageScanResults.clear()
-                villageScanIndex = 0
-                villageScanExpected = 0
-                villageScanRetry = 0
-                villageScanPageRetry = 0
-                villageScanDataRetry = 0
-
-                if (::villageChecklist.isInitialized) villageChecklist.removeAllViews()
-                updateVillageDatabaseView()
-                updateVillageLinkPreviews()
-
-                usernameInput.setText("")
-                passwordInput.setText("")
-
-                // Hapus cookie session Travian agar benar-benar logout.
-                val cookieManager = CookieManager.getInstance()
-                cookieManager.removeAllCookies {
-                    cookieManager.flush()
-                    runOnUiThread {
-                        farmStatus.text = "Logout berhasil — database dihapus."
-                        status.text = "Status: LOGOUT"
-                        nextRun.text = "Next run: --"
-                        updateBotToggleVisual(false)
-                        botToggle.setOnCheckedChangeListener(null)
-                        botToggle.isChecked = false
-                        botToggle.setOnCheckedChangeListener(this@MainActivity::handleBotToggle)
-                        logEvent("LOGOUT selesai — credential, cookie, DATABASE VILLAGE dan Resource Builder dihapus")
-                    }
-                }
-                cookieManager.flush()
+                handler.postDelayed({
+                    if (isFinishing) return@postDelayed
+                    completeLogoutAndClearDatabase()
+                }, 1200L)
             }
+            .show()
     }
+
+    private fun completeLogoutAndClearDatabase() {
+        debugTrace("ENTER completeLogoutAndClearDatabase")
+
+        if (running || getSharedPreferences("config", MODE_PRIVATE).getBoolean("service_running", false)) {
+            stopScheduler()
+        } else {
+            running = false
+            pendingStartAll = false
+        }
+
+        runCatching { CredentialDatabase(this).clear() }
+        getSharedPreferences("config", MODE_PRIVATE).edit().clear().commit()
+
+        loadedVillages.clear()
+        villageScanActive = false
+        villageScanTargets.clear()
+        villageScanResults.clear()
+        villageScanIndex = 0
+        villageScanExpected = 0
+        villageScanRetry = 0
+        villageScanPageRetry = 0
+        villageScanDataRetry = 0
+        villageScanScrollPass = 0
+        villageScanCollectedTargets.clear()
+        villageScanCollectedLinks.clear()
+        villageScanCollectInFlight = false
+        resourceSnapshots.clear()
+        villageMinLevels.clear()
+        pendingUsername = ""
+        pendingPassword = ""
+        loginInProgress = false
+        reloginRequested = false
+        farmListRequested = false
+        logoutCleanupInProgress = false
+
+        if (::villageChecklist.isInitialized) villageChecklist.removeAllViews()
+        if (::capacityOverview.isInitialized) capacityOverview.removeAllViews()
+        if (::capacityStatus.isInitialized) {
+            capacityStatus.text = "Belum ada data resource. Tekan REFRESH VILLAGE untuk membaca semua village."
+        }
+        if (::villageDatabaseView.isInitialized) villageDatabaseView.text = "DATABASE VILLAGE: kosong"
+        if (::refreshVillageLinkPreview.isInitialized) refreshVillageLinkPreview.text = "REFRESH VILLAGE LINK: -"
+        if (::resourceBuilderVillageLinkPreview.isInitialized) resourceBuilderVillageLinkPreview.text = "RES BUILDER LINK: -"
+
+        usernameInput.setText("")
+        passwordInput.setText("")
+        status.text = "Status: LOGOUT"
+        farmStatus.text = "Logout berhasil — semua data aplikasi dihapus."
+        nextRun.text = "Next run: --"
+        updateBotToggleVisual(false)
+        botToggle.setOnCheckedChangeListener(null)
+        botToggle.isChecked = false
+        botToggle.setOnCheckedChangeListener(this@MainActivity::handleBotToggle)
+        setSelectionControlsLocked(false)
+
+        val cookieManager = CookieManager.getInstance()
+        cookieManager.removeAllCookies {
+            cookieManager.flush()
+            runOnUiThread {
+                runCatching { webView.stopLoading() }
+                runCatching { webView.clearCache(true) }
+                runCatching { webView.clearHistory() }
+                runCatching { webView.clearFormData() }
+                runCatching { android.webkit.WebStorage.getInstance().deleteAllData() }
+            }
+        }
+        cookieManager.flush()
+        clearActivityLog()
+    }
+
     private fun clearVillageDatabaseOnLogout(url: String) {
         val prefs = getSharedPreferences("config", MODE_PRIVATE)
         val raw = prefs.getString(villageDataPrefsKey, "[]").orEmpty()
@@ -750,6 +805,8 @@ class MainActivity : Activity() {
             .remove("resource_builder_targets_json")
             .remove("resource_builder_villages_json")
             .remove("resource_builder_selected_villages")
+            .remove("resource_builder_selection_configured")
+            .remove("resource_snapshots_json")
             .apply()
         loadedVillages.clear()
         if (::villageChecklist.isInitialized) villageChecklist.removeAllViews()
@@ -889,8 +946,12 @@ class MainActivity : Activity() {
         val ids = mutableSetOf<String>()
         for (i in 1 until villageChecklist.childCount) {
             val row = villageChecklist.getChildAt(i) as? LinearLayout ?: continue
-            val box = row.getChildAt(0) as? CheckBox ?: continue
-            if (box.isChecked) box.tag?.toString()?.trim()?.takeIf(String::isNotBlank)?.let(ids::add)
+            for (j in 0 until row.childCount) {
+                val card = row.getChildAt(j) as? LinearLayout ?: continue
+                val id = card.tag?.toString().orEmpty()
+                val box = card.findViewWithTag<CheckBox>("resource:$id")
+                if (box?.isChecked == true && id.isNotBlank()) ids.add(id)
+            }
         }
         return ids
     }
@@ -912,10 +973,10 @@ class MainActivity : Activity() {
 
         val lines = mutableListOf<String>()
         lines += "DATABASE VILLAGE (${records.size})"
-        lines += "CHK | NAMA | ID | LINK VILLAGE | LINK RESOURCE | RES ID | GID | MIN LVL | LINK TOWN"
-        lines += "----+------+----+--------------+---------------+--------+-----+-------+---------"
+        lines += "CHK | NAMA | ID | LINK VILLAGE | LINK RESOURCE | RES ID | GID | MIN LVL | LINK TOWN | HOLD CELEBRATION"
+        lines += "----+------+----+--------------+---------------+--------+-----+-------+---------+-----------------"
         records.forEach { item ->
-            lines += "${if (item.isChecklist) "✓" else "-"} | ${item.namaVillage} | ${item.id} | ${item.linkVillage.ifBlank { "-" }} | ${item.linkResource.ifBlank { "-" }} | ${item.resourceId.ifBlank { "-" }} | ${item.resourceGid.ifBlank { "-" }} | ${if (item.minLvl >= 0) "L${item.minLvl}" else "-"} | ${item.linkTown.ifBlank { "-" }}"
+            lines += "${if (item.isChecklist) "✓" else "-"} | ${item.namaVillage} | ${item.id} | ${item.linkVillage.ifBlank { "-" }} | ${item.linkResource.ifBlank { "-" }} | ${item.resourceId.ifBlank { "-" }} | ${item.resourceGid.ifBlank { "-" }} | ${if (item.minLvl >= 0) "L${item.minLvl}" else "-"} | ${item.linkTown.ifBlank { "-" }} | ${if (item.isHoldCelebration) "✓" else "-"}"
         }
         villageDatabaseView.text = lines.joinToString("\n")
         villageDatabaseView.setTextIsSelectable(true)
@@ -962,14 +1023,18 @@ class MainActivity : Activity() {
             isChecked = if (configured) loadedVillages.keys.all { saved.contains(it) } else true
             setOnCheckedChangeListener { _, checked ->
                 for (i in 1 until villageChecklist.childCount) {
-                    val row = villageChecklist.getChildAt(i) as? LinearLayout ?: continue
-                    val box = row.getChildAt(0) as? CheckBox ?: continue
-                    box.isChecked = checked
-                    box.tag?.toString()?.let { updateVillageChecklistData(it, checked) }
+                    val card = villageChecklist.getChildAt(i) as? LinearLayout ?: continue
+                    val id = card.tag?.toString().orEmpty()
+                    val box = card.findViewWithTag<CheckBox>("resource:$id")
+                    if (box != null) {
+                        box.isChecked = checked
+                        updateVillageChecklistData(id, checked)
+                    }
                 }
                 getSharedPreferences("config", MODE_PRIVATE).edit()
                     .putBoolean("resource_builder_selection_configured", true)
                     .putStringSet("resource_builder_selected_villages", selectedVillageIds())
+                    .putString("resource_builder_villages_json", villageSelectionJson())
                     .apply()
             }
         }
@@ -987,32 +1052,49 @@ class MainActivity : Activity() {
             "$townServer/build.php?id=35&gid=19" to "Barracks",
             "$townServer/build.php?id=38&gid=20" to "Stable",
             "$townServer/build.php?id=23&gid=22" to "Academy",
-            "$townServer/build.php?id=40&gid=31" to "City Wall"
+            "$townServer/build.php?id=40&gid=31" to "City Wall",
+            "$townServer/build.php?id=25&gid=41" to "Residence",
+            "$townServer/build.php?id=33&gid=13" to "Smithy",
+            "$townServer/build.php?id=30&gid=24" to "Town Hall",
+            "$townServer/build.php?id=34&gid=37" to "Hero's Mansion",
+            "$townServer/build.php?id=20&gid=23" to "Cranny",
+            "$townServer/build.php?id=36&gid=21" to "Workshop"
         )
 
-        loadedVillages.forEach { (id, name) ->
+        loadedVillages.entries.toList().forEach { (id, name) ->
+
             val record = villageRecords[id]
-            val row = LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = android.view.Gravity.CENTER_VERTICAL
-                layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
-            }
             val currentMinLevel = record?.minLvl ?: -1
             val currentTownKey = record?.linkTown?.trim().orEmpty().ifBlank { "-" }
+            val currentHoldCelebration = record?.isHoldCelebration ?: false
+
             fun townDisplayText(townKey: String): String {
                 val townText = townOptions.firstOrNull { it.first == townKey }?.second ?: "-"
                 val minText = if (currentMinLevel >= 0) "L$currentMinLevel" else "-"
-                // loadedVillages may already contain the old resource level suffix
-                // (e.g. "A1 - Lvl 10"). For the Town Builder label, show only the
-                // village name followed by the current minimum resource level.
                 val displayName = name.substringBefore(" - Lvl ").trim().ifBlank { name }
                 return "$displayName - min lvl $minText - $townText"
             }
 
+            val card = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(8, 6, 8, 8)
+                tag = id
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                ).apply {
+                    setMargins(3, 4, 3, 4)
+                }
+                background = GradientDrawable().apply {
+                    setColor(Color.TRANSPARENT)
+                    setStroke(2, Color.GRAY)
+                    cornerRadius = 8f
+                }
+            }
+
             val box = CheckBox(this).apply {
                 text = townDisplayText(currentTownKey)
-                tag = id
-                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                tag = "resource:$id"
                 isEnabled = !selectionControlsLocked
                 isChecked = if (configured) saved.contains(id) else true
                 setOnCheckedChangeListener { _, checked ->
@@ -1024,8 +1106,18 @@ class MainActivity : Activity() {
                         .apply()
                 }
             }
+
+            val townAndHold = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = android.view.Gravity.CENTER_VERTICAL
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                )
+            }
+
             val spinner = Spinner(this).apply {
-                layoutParams = LinearLayout.LayoutParams(170, LinearLayout.LayoutParams.WRAP_CONTENT)
+                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
                 adapter = object : android.widget.ArrayAdapter<String>(
                     this@MainActivity,
                     android.R.layout.simple_spinner_item,
@@ -1039,7 +1131,7 @@ class MainActivity : Activity() {
                         tv.gravity = android.view.Gravity.CENTER_VERTICAL
                         tv.setSingleLine(true)
                         tv.ellipsize = android.text.TextUtils.TruncateAt.END
-                        tv.setPadding(10, 6, 8, 6)
+                        tv.setPadding(8, 4, 6, 4)
                         return tv
                     }
 
@@ -1053,8 +1145,7 @@ class MainActivity : Activity() {
                         return tv
                     }
                 }
-                val current = currentTownKey
-                setSelection(townOptions.indexOfFirst { it.first == current }.coerceAtLeast(0))
+                setSelection(townOptions.indexOfFirst { it.first == currentTownKey }.coerceAtLeast(0))
                 isEnabled = !selectionControlsLocked
                 onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
                     override fun onNothingSelected(parent: android.widget.AdapterView<*>?) = Unit
@@ -1070,9 +1161,23 @@ class MainActivity : Activity() {
                     }
                 }
             }
-            row.addView(box)
-            row.addView(spinner)
-            villageChecklist.addView(row)
+
+            val hold = CheckBox(this).apply {
+                text = "isHoldCelebration"
+                textSize = 11f
+                setPadding(4, 0, 0, 0)
+                isEnabled = !selectionControlsLocked
+                isChecked = currentHoldCelebration
+                setOnCheckedChangeListener { _, checked ->
+                    updateVillageHoldCelebrationData(id, checked)
+                }
+            }
+
+            townAndHold.addView(spinner)
+            townAndHold.addView(hold)
+            card.addView(box)
+            card.addView(townAndHold)
+            villageChecklist.addView(card)
         }
 
         logEvent("UI: ${loadedVillages.size} village dimuat: ${loadedVillages.values.joinToString(" | ")}")
@@ -1121,6 +1226,12 @@ class MainActivity : Activity() {
 
                             const clickable = node?.closest?.('a,button,[role="button"],input,select,summary') || node;
                             if (!clickable) return;
+
+                            const isTravianLogout = clickable.id === 'button6aaa328d7a848' ||
+                                (clickable.matches?.('a.logout') && /auth\/logout/i.test(clickable.getAttribute('onclick') || ''));
+                            if (isTravianLogout) {
+                                try { AndroidFarm.onTravianLogoutClick(); } catch (_) {}
+                            }
 
                             const entry = clickable.closest?.('.listEntry, .dropContainer, li');
                             const anchor = clickable.matches?.('a[href]')
@@ -2515,7 +2626,6 @@ class MainActivity : Activity() {
         var s = value.trim()
         if (s.isBlank() && ::serverInput.isInitialized) s = serverInput.text.toString().trim()
         if (s.isBlank()) s = CredentialDatabase(this).read()?.server.orEmpty().trim()
-        if (s.isBlank()) s = "https://ts20.x2.europe.travian.com"
         if (!s.startsWith("http", true)) s = "https://$s"
         return s.trimEnd('/')
     }
@@ -2628,6 +2738,25 @@ class MainActivity : Activity() {
                             reloginRequested = false
                         }
                     }
+                }
+            }
+        }
+
+        @JavascriptInterface
+        fun onHoldCelebrationClick(villageName: String) {
+            debugTrace("ENTER onHoldCelebrationClick")
+            runOnUiThread { logEvent("Nama Village $villageName Hold Celebration Success") }
+        }
+
+        @JavascriptInterface
+        fun onTravianLogoutClick() {
+            debugTrace("ENTER onTravianLogoutClick")
+            runOnUiThread {
+                if (logoutCleanupInProgress) {
+                    logEvent("LOGOUT DOM diklik — menunggu cleanup utama")
+                } else {
+                    clearVillageDatabaseOnLogout("Travian logout DOM")
+                    logEvent("LOGOUT DOM diklik — database village dihapus")
                 }
             }
         }
@@ -3156,12 +3285,15 @@ class MainActivity : Activity() {
         val farmStart = prefs.getLong("farm_cycle_started_at", 0L)
         val resourceStart = prefs.getLong("resource_cycle_started_at", 0L)
         val townStart = prefs.getLong("town_cycle_started_at", 0L)
+        val holdStart = prefs.getLong("hold_celebration_cycle_started_at", 0L)
         val farmDuration = if (farmStart > 0L) now - farmStart else prefs.getLong("farm_cycle_duration_ms", 0L)
         val resourceDuration = if (resourceStart > 0L) now - resourceStart else prefs.getLong("resource_cycle_duration_ms", 0L)
         val townDuration = if (townStart > 0L) now - townStart else prefs.getLong("town_cycle_duration_ms", 0L)
+        val holdDuration = if (holdStart > 0L) now - holdStart else prefs.getLong("hold_celebration_cycle_duration_ms", 0L)
         farmCycleTime.text = "Waktu Siklus Farm List: ${formatDuration(farmDuration)}"
         resourceCycleTime.text = "Waktu Siklus Resource Builder: ${formatDuration(resourceDuration)}"
         townCycleTime.text = "Waktu Siklus Town Builder: ${formatDuration(townDuration)}"
+        holdCelebrationCycleTime.text = "Waktu Siklus Hold Celebration: ${formatDuration(holdDuration)}"
     }
 
     private fun updateCountdown() {

@@ -61,6 +61,10 @@ class FarmAutomationService : Service() {
             instanceRef?.get()?.handleVillageListResult(result)
         }
 
+        fun requestTravianLogout() {
+            instanceRef?.get()?.requestTravianLogoutInternal()
+        }
+
         fun onVisibleWebViewDetached() {
             instanceRef?.get()?.onVisibleWebViewDetachedInternal()
         }
@@ -121,7 +125,8 @@ class FarmAutomationService : Service() {
         val resourceId: String,
         val resourceGid: String,
         val minLvl: Int,
-        val linkTown: String
+        val linkTown: String,
+        val isHoldCelebration: Boolean
     )
 
     private fun rebaseTravianUrl(value: String): String {
@@ -160,7 +165,8 @@ class FarmAutomationService : Service() {
                     resourceId = item.optString("ResourceId").trim(),
                     resourceGid = item.optString("ResourceGid").trim(),
                     minLvl = item.optInt("MinLvl", -1),
-                    linkTown = rebaseTravianUrl(item.optString("LinkTown", "-").trim().ifBlank { "-" })
+                    linkTown = rebaseTravianUrl(item.optString("LinkTown", "-").trim().ifBlank { "-" }),
+                    isHoldCelebration = item.optBoolean("IsHoldCelebration", false)
                 )
             )
         }
@@ -180,6 +186,7 @@ class FarmAutomationService : Service() {
                 put("ResourceGid", item.resourceGid)
                 put("MinLvl", item.minLvl)
                 put("LinkTown", rebaseTravianUrl(item.linkTown))
+                put("IsHoldCelebration", item.isHoldCelebration)
             })
         }
         getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString("village_data_json", array.toString()).apply()
@@ -223,6 +230,9 @@ class FarmAutomationService : Service() {
     private var resourceBuilderEnabled = true
     private var townBuilderEnabled = false
     private var townBuilderInProgress = false
+    private var holdCelebrationInProgress = false
+    private var holdCelebrationVillages = mutableListOf<Pair<String, String>>()
+    private var holdCelebrationIndex = 0
     private var farmListEnabled = true
     private var builderSelectionConfigured = false
     private var selectedBuilderVillageIds = emptySet<String>()
@@ -251,9 +261,63 @@ class FarmAutomationService : Service() {
     private var heroTransferCompleted = false
     private var inventoryUseAttempt = 0
     private var cycleNumber = 0
+    // Guard scheduler: satu waktu Next Run hanya boleh menghasilkan satu cycle.
+    private var cycleStartInProgress = false
     private var farmListCycleStartedAt = 0L
     private var resourceBuilderCycleStartedAt = 0L
     private var townBuilderCycleStartedAt = 0L
+    private var holdCelebrationCycleStartedAt = 0L
+    private var holdCelebrationTransferPending = false
+
+    // Batas maksimum masing-masing modul Builder/Celebration. Jika satu modul
+    // macet lebih dari 4 menit, modul dianggap selesai lalu alur dilanjutkan.
+    private val moduleMaxDurationMs = 4 * 60_000L
+
+    private val resourceBuilderTimeoutRunnable = Runnable {
+        if (!running || !builderInProgress || townBuilderInProgress || resourceBuilderCycleStartedAt <= 0L) return@Runnable
+        logEvent("Res Builder over 4 min, process stop")
+        try { automationWebView()?.stopLoading() } catch (_: Exception) {}
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putLong("resource_cycle_started_at", 0L).apply()
+        resourceBuilderCycleStartedAt = 0L
+        builderInProgress = false
+        builderVillages.clear()
+        builderVillageIndex = 0
+        pendingBuilderResourceHref = ""
+        pendingUpgradeUrl = ""
+        pendingUpgradeCosts = longArrayOf(0L, 0L, 0L, 0L)
+        heroTransferCompleted = false
+        inventoryUseAttempt = 0
+        builderStage = "IDLE"
+        if (townBuilderEnabled) startTownBuilderCycle() else startHoldCelebrationCycle()
+    }
+
+    private val townBuilderTimeoutRunnable = Runnable {
+        if (!running || !townBuilderInProgress || townBuilderCycleStartedAt <= 0L) return@Runnable
+        logEvent("Town Builder over 4 min, process stop")
+        try { automationWebView()?.stopLoading() } catch (_: Exception) {}
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putLong("town_cycle_started_at", 0L).apply()
+        townBuilderCycleStartedAt = 0L
+        townBuilderInProgress = false
+        builderInProgress = false
+        builderVillages.clear()
+        builderVillageIndex = 0
+        pendingBuilderResourceHref = ""
+        pendingUpgradeUrl = ""
+        pendingUpgradeCosts = longArrayOf(0L, 0L, 0L, 0L)
+        heroTransferCompleted = false
+        inventoryUseAttempt = 0
+        builderStage = "IDLE"
+        startHoldCelebrationCycle()
+    }
+
+    private val celebrationTimeoutRunnable = Runnable {
+        if (!running || !holdCelebrationInProgress || holdCelebrationCycleStartedAt <= 0L) return@Runnable
+        logEvent("Celebration over 4 min, process stop")
+        try { automationWebView()?.stopLoading() } catch (_: Exception) {}
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putLong("hold_celebration_cycle_started_at", 0L).apply()
+        holdCelebrationCycleStartedAt = 0L
+        finishHoldCelebrationCycle()
+    }
     private var recoveringService = false
     private var webViewRecoveryInProgress = false
     private var lastAutomationUrl = ""
@@ -298,19 +362,41 @@ class FarmAutomationService : Service() {
                 val cycleActive = getSharedPreferences(PREFS, MODE_PRIVATE)
                     .getBoolean("cycle_active", false)
 
+                // Scheduler heartbeat juga menjadi pengaman untuk Refresh Village.
+                // Jika callback +30 detik sempat hilang/tertunda karena WebView atau
+                // Android background scheduling, refresh tetap dipicu dari timestamp
+                // countdown yang tersimpan.
+                val countdownStartedAt = getSharedPreferences(PREFS, MODE_PRIVATE)
+                    .getLong("countdown_started_at", 0L)
+                val refreshDue = countdownStartedAt > 0L &&
+                    now >= countdownStartedAt + 30_000L &&
+                    scheduledRefreshForNextRun &&
+                    !villageRefreshInProgress &&
+                    !villageRefreshCompleted
+                if (!cycleActive && refreshDue) {
+                    logEvent("AUTO REFRESH VILLAGE: heartbeat mendeteksi jadwal +30 detik — menjalankan refresh")
+                    handler.removeCallbacks(delayedVillageRefreshRunnable)
+                    handler.post {
+                        if (running && !villageRefreshInProgress && !villageRefreshCompleted) {
+                            delayedVillageRefreshRunnable.run()
+                        }
+                    }
+                }
+
                 if (!cycleActive && nextAt > 0L && now >= nextAt) {
                     handler.removeCallbacks(nextRunRunnable)
-                    triggerScheduledCycle()
+                    logEvent("Scheduler heartbeat: Countdown 00:00 — kill proses lama dan wajib CICLE START")
+                    forceStartCycleAtCountdownZero()
                 }
             } finally {
-                if (running) handler.postDelayed(this, 5_000L)
+                if (running) handler.postDelayed(this, 10_000L)
             }
         }
     }
 
     private fun armSchedulerHeartbeat() {
         handler.removeCallbacks(schedulerHeartbeatRunnable)
-        if (running) handler.postDelayed(schedulerHeartbeatRunnable, 5_000L)
+        if (running) handler.postDelayed(schedulerHeartbeatRunnable, 10_000L)
         armFourMinuteScheduler()
     }
 
@@ -327,49 +413,25 @@ class FarmAutomationService : Service() {
                 val countdownExpired = nextAt > 0L && now >= nextAt
 
                 if (!cycleActive && countdownExpired) {
-                    logEvent("Scheduler 4 Menit: Countdown 00:00 — reset proses dan mulai CICLE")
+                    logEvent("Scheduler guard: Countdown 00:00 — kill proses lama dan wajib CICLE START")
 
-                    // Hentikan pekerjaan yang mungkin masih menahan WebView/Handler.
-                    handler.removeCallbacks(nextRunRunnable)
-                    handler.removeCallbacks(delayedVillageRefreshRunnable)
-                    handler.removeCallbacks(cycleWatchdogRunnable)
-                    villageRefreshTimeoutRunnable?.let { handler.removeCallbacks(it) }
-                    villageRefreshTimeoutRunnable = null
-                    try { automationWebView()?.stopLoading() } catch (_: Exception) {}
+                    // Jangan lagi memalsukan villageRefreshCompleted=true. Jika refresh
+                    // belum sempat dijalankan, jalankan sekarang. Jika sedang berjalan,
+                    // biarkan sampai selesai/timeout. Setelah selesai, closeAutomaticVillageRefresh()
+                    // akan memanggil triggerScheduledCycle().
+                    forceStartCycleAtCountdownZero()
+                    return
 
-                    pendingStartAll = false
-                    builderInProgress = false
-                    loginInProgress = false
-                    reloginRequested = false
-                    countdownCyclePending = false
-                    scheduledRefreshForNextRun = false
-                    villageRefreshInProgress = false
-                    villageRefreshInspectInFlight = false
-                    villageRefreshCompleted = true
-                    villageRefreshClosed = true
-                    farmListCycleComplete = false
-                    pendingUpgradeUrl = ""
-                    pendingUpgradeCosts = longArrayOf(0L, 0L, 0L, 0L)
-                    heroTransferCompleted = false
-                    nextAt = 0L
-                    updateNextRun(0L)
-                    getSharedPreferences(PREFS, MODE_PRIVATE).edit()
-                        .putBoolean("cycle_active", false)
-                        .apply()
-
-                    handler.post {
-                        if (running) triggerScheduledCycle()
-                    }
                 }
             } finally {
-                if (running) handler.postDelayed(this, 4 * 60_000L)
+                if (running) handler.postDelayed(this, 10_000L)
             }
         }
     }
 
     private fun armFourMinuteScheduler() {
         handler.removeCallbacks(fourMinuteSchedulerRunnable)
-        if (running) handler.postDelayed(fourMinuteSchedulerRunnable, 4 * 60_000L)
+        if (running) handler.postDelayed(fourMinuteSchedulerRunnable, 10_000L)
     }
     /**
      * Refresh Village dijalankan 30 detik setelah countdown dimulai.
@@ -527,6 +589,7 @@ class FarmAutomationService : Service() {
         farmListCycleStartedAt = prefs.getLong("farm_cycle_started_at", 0L)
         resourceBuilderCycleStartedAt = prefs.getLong("resource_cycle_started_at", 0L)
         townBuilderCycleStartedAt = prefs.getLong("town_cycle_started_at", 0L)
+        holdCelebrationCycleStartedAt = prefs.getLong("hold_celebration_cycle_started_at", 0L)
 
         if (username.isBlank() || password.isBlank()) {
             logEvent("RECOVERY: credential database kosong/tidak valid; recovery dibatalkan")
@@ -562,6 +625,24 @@ class FarmAutomationService : Service() {
                 scheduleVillageRefreshForNextRun(savedCountdownStartedAt)
             }
         }, 800L)
+    }
+
+    private fun requestTravianLogoutInternal() {
+        debugTrace("ENTER requestTravianLogoutInternal")
+        handler.post {
+            val js = """
+                (() => {
+                    try {
+                        const el = document.querySelector(
+                            'a.layoutButton.logout[onclick*="auth/logout"], a#button6aaa328d7a848'
+                        );
+                        if (el) { el.click(); return 'clicked'; }
+                        return 'not_found';
+                    } catch (e) { return 'error'; }
+                })();
+            """.trimIndent()
+            automationWebView()?.evaluateJavascript(js, null)
+        }
     }
 
     private fun automationWebView(): WebView? {
@@ -719,25 +800,71 @@ class FarmAutomationService : Service() {
         triggerScheduledCycle()
     }
 
+    /**
+     * Countdown sudah 00:00: hentikan seluruh pekerjaan/callback yang mungkin
+     * masih tertinggal, lalu paksa CICLE START. Refresh Village tidak boleh
+     * memblokir cycle baru pada titik ini.
+     */
+    private fun forceStartCycleAtCountdownZero() {
+        if (!running) return
+        val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
+        if (prefs.getBoolean("cycle_active", false) || cycleStartInProgress) return
+
+        logEvent("COUNTDOWN 00:00 — menghentikan seluruh proses lama dan MEMAKSA CICLE START")
+        handler.removeCallbacks(nextRunRunnable)
+        handler.removeCallbacks(delayedVillageRefreshRunnable)
+        handler.removeCallbacks(cycleWatchdogRunnable)
+        handler.removeCallbacks(resourceBuilderTimeoutRunnable)
+        handler.removeCallbacks(townBuilderTimeoutRunnable)
+        handler.removeCallbacks(celebrationTimeoutRunnable)
+
+        try { automationWebView()?.stopLoading() } catch (_: Exception) {}
+        pendingStartAll = false
+        builderInProgress = false
+        loginInProgress = false
+        reloginRequested = false
+        villageRefreshInProgress = false
+        villageRefreshCompleted = true
+        villageRefreshClosed = true
+        villageRefreshInspectInFlight = false
+        scheduledRefreshForNextRun = false
+        countdownCyclePending = false
+        nextAt = 0L
+        updateNextRun(0L)
+
+        triggerScheduledCycle()
+    }
+
     private fun triggerScheduledCycle() {
         debugTrace("ENTER triggerScheduledCycle")
         if (!running) return
 
-        // Jangan membuat cycle baru berulang-ulang ketika refresh masih berjalan.
-        // Versi lama menaikkan cycleNumber setiap retry 1 detik sehingga scheduler
-        // dapat tertahan lama dan callback Next Run menjadi tidak konsisten.
+        // Semua callback scheduler berjalan di MainLooper. Begitu satu cycle
+        // sudah aktif, callback lain (Next Run, heartbeat, retry refresh, dsb.)
+        // HARUS langsung diabaikan. Ini mencegah CYCLE 2..36 START pada timestamp
+        // yang sama.
+        val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
+        if (cycleStartInProgress || prefs.getBoolean("cycle_active", false)) {
+            return
+        }
+
+        // Jangan membuat banyak retry callback ketika AUTO REFRESH VILLAGE belum
+        // selesai. Cukup satu retry yang menunggu sampai refresh benar-benar tutup.
         if (!villageRefreshClosed || villageRefreshInProgress || !villageRefreshCompleted) {
             if (!cycleWaitingForRefreshRetry) {
                 cycleWaitingForRefreshRetry = true
                 logEvent("Siklus menunggu AUTO REFRESH VILLAGE selesai")
+                handler.postDelayed({
+                    cycleWaitingForRefreshRetry = false
+                    if (running) triggerScheduledCycle()
+                }, 1_000L)
             }
-            handler.postDelayed({
-                cycleWaitingForRefreshRetry = false
-                if (running) triggerScheduledCycle()
-            }, 1_000L)
             return
         }
 
+        // Lock dipasang SEBELUM cycleNumber dinaikkan dan sebelum callback lain
+        // mendapat kesempatan masuk.
+        cycleStartInProgress = true
         countdownCyclePending = false
         scheduledRefreshForNextRun = false
         val now = timeFormat.format(Date())
@@ -756,6 +883,8 @@ class FarmAutomationService : Service() {
             .putLong("farm_cycle_started_at", farmListCycleStartedAt)
             .putLong("resource_cycle_started_at", 0L)
             .apply()
+        cycleStartInProgress = false
+        cycleWaitingForRefreshRetry = false
         logEvent("CICLE START")
         handler.removeCallbacks(cycleWatchdogRunnable)
         handler.postDelayed(cycleWatchdogRunnable, 15 * 60_000L)
@@ -777,8 +906,7 @@ class FarmAutomationService : Service() {
         } else if (townBuilderEnabled) {
             startTownBuilderCycle()
         } else {
-            logEvent("Farm List OFF dan Resource Builder OFF — tidak ada aksi pada siklus ini")
-            scheduleNextRandomRun()
+            startHoldCelebrationCycle()
         }
     }
 
@@ -893,6 +1021,11 @@ class FarmAutomationService : Service() {
                 }
                 return@acceptCookiesIfPresent
             }
+            if (holdCelebrationInProgress && lower.contains("build.php")) {
+                processHoldCelebrationPage()
+                return@acceptCookiesIfPresent
+            }
+
             if (townBuilderInProgress && lower.contains("build.php")) {
                 processTownBuilderPage()
                 return@acceptCookiesIfPresent
@@ -1380,7 +1513,7 @@ class FarmAutomationService : Service() {
             if (townBuilderEnabled) {
                 startTownBuilderCycle()
             } else {
-                scheduleNextRandomRun()
+                startHoldCelebrationCycle()
             }
             return
         }
@@ -1699,7 +1832,8 @@ class FarmAutomationService : Service() {
                 records[pos] = old.copy(
                     namaVillage = json.optString("name").trim().ifBlank { expectedName },
                     linkVillage = "$server/dorf1.php?newdid=$expectedId",
-                    linkResource = if (validResourceTarget) href else "",
+                    //linkResource = if (validResourceTarget) href else "",
+                    linkResource = if (validResourceTarget) "$server/build.php?id=${resourceId.toString()}&gid=${resourceGid.toString()}" else "",
                     resourceId = if (validResourceTarget) resourceId.toString() else "",
                     resourceGid = if (validResourceTarget) resourceGid.toString() else "",
                     minLvl = minLevel
@@ -1707,7 +1841,8 @@ class FarmAutomationService : Service() {
                 saveVillageDataRecordsForService(records)
 
                 if (validResourceTarget) {
-                    logEvent("Village $expectedName Updated min L$minLevel")
+                    //logEvent("Village $expectedName Updated min L$minLevel")
+                    logEvent("Village $expectedName Updated min Lvl $minLevel - id=${resourceId.toString()}&gid=${resourceGid.toString()}")
                 } else {
                     logEvent("Village $expectedName Updated min L$minLevel — Resource Builder target selesai; database tetap disimpan")
                 }
@@ -1768,6 +1903,8 @@ class FarmAutomationService : Service() {
         getSharedPreferences(PREFS, MODE_PRIVATE).edit()
             .putLong("resource_cycle_started_at", now)
             .apply()
+        handler.removeCallbacks(resourceBuilderTimeoutRunnable)
+        handler.postDelayed(resourceBuilderTimeoutRunnable, moduleMaxDurationMs)
         val hasVillageData = loadBuilderStateFromVillageData()
         if (!hasVillageData) {
             logEvent("Resource Builder: tidak ada village yang dicentang; siklus selesai")
@@ -2255,10 +2392,13 @@ private fun clickTransferSelected() {
             val result = raw.orEmpty().trim('"').replace("\\\"", "\"")
 
             if (result.contains("\"stillThere\":false")) {
-                logEvent(if (townBuilderInProgress) "Town Builder: Transfer Selected selesai — lanjut Upgrade" else "Resource Builder: Transfer Selected terkonfirmasi selesai — langsung Upgrade")
+                logEvent(if (townBuilderInProgress) "Town Builder: Transfer Selected selesai — tunggu 2 detik lalu cek Upgrade lagi" else "Resource Builder: Transfer Selected selesai — tunggu 2 detik lalu cek Upgrade lagi")
                 heroTransferCompleted = true
                 pendingUpgradeCosts = longArrayOf(0L,0L,0L,0L)
-                handler.postDelayed({ clickResourceUpgrade() }, 700L)
+                // Sesuai alur: setelah Transfer Selected, beri Travian waktu
+                // refresh resource selama 2 detik, lalu CEK ULANG apakah Upgrade
+                // sudah tersedia. Jika masih belum tersedia, village di-skip.
+                handler.postDelayed({ recheckUpgradeAfterTransfer() }, 2_000L)
             } else if (inventoryUseAttempt < 18) {
                 inventoryUseAttempt++
                 debugTrace("HERO TRANSFER: Transfer Selected masih ada; menunggu proses (${inventoryUseAttempt}/18)")
@@ -2272,12 +2412,40 @@ private fun clickTransferSelected() {
         }
     }
 
+    private fun recheckUpgradeAfterTransfer() {
+        if (!running || !builderInProgress) return
+        val currentUrl = automationWebView()?.url.orEmpty()
+        if (!currentUrl.contains("build.php", ignoreCase = true) || currentUrl.contains("gid=16", ignoreCase = true)) {
+            logEvent(if (townBuilderInProgress) "Town Builder: setelah transfer halaman bukan target build — village dilewati" else "Resource Builder: setelah transfer halaman bukan target resource — village dilewati")
+            goToNextBuilderVillage()
+            return
+        }
+        logEvent(if (townBuilderInProgress) "Town Builder: cek ulang Upgrade setelah transfer" else "Resource Builder: cek ulang Upgrade setelah transfer")
+        val js = """
+            (() => {
+                const text = String(document.body?.innerText || document.documentElement?.innerText || '')
+                    .replace(/\s+/g, ' ').trim();
+                return /upgrade\s+to\s+level/i.test(text) ? 'upgrade_available' : 'not_available';
+            })();
+        """.trimIndent()
+        automationWebView()?.evaluateJavascript(js) { raw ->
+            if (raw.orEmpty().contains("upgrade_available")) {
+                logEvent(if (townBuilderInProgress) "Town Builder: Upgrade tersedia setelah transfer — klik Upgrade" else "Resource Builder: Upgrade tersedia setelah transfer — klik Upgrade")
+                clickResourceUpgrade()
+            } else {
+                val name = builderVillages.getOrNull(builderVillageIndex)?.second ?: "Village"
+                logEvent(if (townBuilderInProgress) "Town Builder: $name masih belum bisa upgrade setelah transfer — SKIP village" else "Resource Builder: $name masih belum bisa upgrade setelah transfer — SKIP village")
+                goToNextBuilderVillage()
+            }
+        }
+    }
+
     private fun startTownBuilderCycle() {
         debugTrace("ENTER startTownBuilderCycle")
         if (!running || !townBuilderEnabled || townBuilderInProgress) return
 
-        // Town Builder TIDAK mengikuti checklist Resource Builder.
-        // Ia memproses SEMUA record database yang Link Town-nya bukan "-".
+        // Town Builder mengikuti checklist yang sama: hanya record
+        // IsChecklist=true yang diproses, lalu memakai Link Town dari DB.
         val records = loadVillageDataRecordsFromPrefs()
         persistRebasedVillageData(records)
         builderVillages.clear()
@@ -2320,6 +2488,8 @@ private fun clickTransferSelected() {
         getSharedPreferences(PREFS, MODE_PRIVATE).edit()
             .putLong("town_cycle_started_at", townBuilderCycleStartedAt)
             .apply()
+        handler.removeCallbacks(townBuilderTimeoutRunnable)
+        handler.postDelayed(townBuilderTimeoutRunnable, moduleMaxDurationMs)
 
         logEvent("Town Builder: START — ${builderVillages.size} village Link Town aktif")
         logEvent("Town Builder: target = ${builderVillages.joinToString(" | ") { "${it.second} [${it.first}]" }}")
@@ -2397,6 +2567,7 @@ private fun clickTransferSelected() {
 
     private fun finishTownBuilderCycle() {
         debugTrace("ENTER finishTownBuilderCycle")
+        handler.removeCallbacks(townBuilderTimeoutRunnable)
         val now = System.currentTimeMillis()
         if (townBuilderCycleStartedAt > 0L) {
             val duration = (now - townBuilderCycleStartedAt).coerceAtLeast(0L)
@@ -2416,36 +2587,545 @@ private fun clickTransferSelected() {
         pendingUpgradeCosts = longArrayOf(0L,0L,0L,0L)
         builderStage = "IDLE"
         logEvent("Town Builder: END")
+        startHoldCelebrationCycle()
+    }
+
+    private var holdCelebrationInspectAttempt = 0
+    private var holdCelebrationTransferAttempt = 0
+
+    private fun startHoldCelebrationCycle() {
+        if (!running) {
+            return
+        }
+        val records = loadVillageDataRecordsFromPrefs()
+        records.forEachIndexed { i, r ->
+        }
+
+        holdCelebrationVillages = records
+            .filter { it.isHoldCelebration }
+            .map { it.id to it.namaVillage }
+            .distinctBy { it.first }
+            .toMutableList()
+        holdCelebrationVillages.forEachIndexed { i, pair ->
+        }
+
+        if (holdCelebrationVillages.isEmpty()) {
+            finishHoldCelebrationCycle()
+            return
+        }
+
+        holdCelebrationInProgress = true
+        holdCelebrationCycleStartedAt = System.currentTimeMillis()
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+            .putLong("hold_celebration_cycle_started_at", holdCelebrationCycleStartedAt)
+            .apply()
+        handler.removeCallbacks(celebrationTimeoutRunnable)
+        handler.postDelayed(celebrationTimeoutRunnable, moduleMaxDurationMs)
+        holdCelebrationIndex = 0
+        holdCelebrationTransferPending = false
+        holdCelebrationInspectAttempt = 0
+        holdCelebrationTransferAttempt = 0
+        updateNotification("Hold Celebration — ${holdCelebrationVillages.size} village")
+        processHoldCelebrationVillage()
+    }
+
+    private fun processHoldCelebrationVillage() {
+
+        if (!running || !holdCelebrationInProgress) {
+            return
+        }
+
+        val pair = holdCelebrationVillages.getOrNull(holdCelebrationIndex)
+
+        if (pair == null) {
+            finishHoldCelebrationCycle()
+            return
+        }
+
+        val id = pair.first
+        val name = pair.second
+        holdCelebrationInspectAttempt = 0
+        holdCelebrationTransferAttempt = 0
+        val target = "${server}/build.php?id=30&gid=24&newdid=$id"
+        updateNotification("Hold Celebration — $name")
+
+        val webView = automationWebView()
+        if (webView == null) {
+            return
+        }
+        webView.loadUrl(target)
+    }
+
+    private fun processHoldCelebrationPage() {
+        if (!running || !holdCelebrationInProgress) {
+            return
+        }
+        val pair = holdCelebrationVillages.getOrNull(holdCelebrationIndex)
+        if (pair == null) {
+            finishHoldCelebrationCycle()
+            return
+        }
+
+        val id = pair.first
+        val name = pair.second
+        holdCelebrationInspectAttempt++
+        val attempt = holdCelebrationInspectAttempt
+
+        handler.postDelayed({
+            if (!running || !holdCelebrationInProgress) {
+                return@postDelayed
+            }
+
+            val js = """
+                (() => {
+                    const visible = el => {
+                        if (!el) return false;
+                        const s = getComputedStyle(el), r = el.getBoundingClientRect();
+                        return s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0' && r.width > 0 && r.height > 0;
+                    };
+                    const norm = s => String(s || '').replace(/\\s+/g, ' ').trim();
+                    const controls = [
+                        ...document.querySelectorAll('button'),
+                        ...document.querySelectorAll('input[type=button],input[type=submit]'),
+                        ...document.querySelectorAll('[role="button"]'),
+                        ...document.querySelectorAll('a')
+                    ].filter(el => visible(el));
+                    const textOf = el => String(el.innerText || el.textContent || el.value || el.title || el.getAttribute('aria-label') || '').replace(/\\s+/g,' ').trim();
+                    const attrs = el => el ? {
+                        tag: el.tagName,
+                        id: el.id || '',
+                        cls: el.className ? String(el.className) : '',
+                        value: el.getAttribute('value') || '',
+                        disabled: !!el.disabled,
+                        text: textOf(el),
+                        onclick: el.getAttribute('onclick') || '',
+                        html: (el.outerHTML || '').slice(0,1200)
+                    } : null;
+                    const holdCandidates = controls.filter(el => /^hold$/i.test(textOf(el)));
+                    const exchangeCandidates = [
+                        ...document.querySelectorAll('button.exchange'),
+                        ...document.querySelectorAll('button')
+                    ].filter((el, i, arr) => arr.indexOf(el) === i && /exchange\s+resources/i.test(textOf(el) || el.getAttribute('value') || el.getAttribute('title') || ''));
+                    const transferCandidates = [...document.querySelectorAll('.inlineIcon.resource.transfer.fillUp')].filter(visible);
+                    const bodyText = String(document.body?.innerText || '').replace(/\\s+/g,' ').trim();
+                    const lower = bodyText.toLowerCase();
+                    return JSON.stringify({
+                        url: location.href,
+                        readyState: document.readyState,
+                        title: document.title,
+                        bodyLength: bodyText.length,
+                        bodyHasCelebration: /celebration/i.test(bodyText),
+                        bodyHasHold: /\\bhold\\b/i.test(bodyText),
+                        bodyHasExchange: /exchange\\s+resources/i.test(bodyText),
+                        controlCount: controls.length,
+                        holdCount: holdCandidates.length,
+                        exchangeCount: exchangeCandidates.length,
+                        transferHeroCount: transferCandidates.length,
+                        hold: attrs(holdCandidates[0]),
+                        exchange: attrs(exchangeCandidates[0]),
+                        transferHero: attrs(transferCandidates[0]),
+                        sampleControls: controls.slice(0,25).map(attrs),
+                        bodyExcerpt: bodyText.slice(0,2500)
+                    });
+                })();
+            """.trimIndent()
+            automationWebView()?.evaluateJavascript(js) { raw ->
+                val result = raw.orEmpty().trim('"').replace("\\\"", "\"")
+
+                val holdFound = Regex("\\\"holdCount\\\":(\\d+)").find(result)?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 0
+                val exchangeFound = Regex("\\\"exchangeCount\\\":(\\d+)").find(result)?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 0
+                val transferFound = Regex("\\\"transferHeroCount\\\":(\\d+)").find(result)?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 0
+
+                when {
+                    holdFound > 0 -> {
+                        holdCelebrationTransferPending = false
+                        holdCelebrationInspectAttempt = 0
+                        automationWebView()?.evaluateJavascript("""(() => { const els=[...document.querySelectorAll('button,input[type=button],input[type=submit],[role="button"],a')]; const n=s=>String(s||'').replace(/\\s+/g,' ').trim(); const h=els.find(e=>{const x=getComputedStyle(e),r=e.getBoundingClientRect();return x.display!=='none'&&x.visibility!=='hidden'&&r.width>0&&r.height>0&&!e.disabled&&/^hold$/i.test(n(e.innerText||e.textContent||e.value||e.title||e.getAttribute('aria-label')))}); if(!h)return JSON.stringify({state:'hold_missing'}); h.scrollIntoView({block:'center',inline:'center'}); try{h.click();}catch(e){try{['mousedown','mouseup','click'].forEach(t=>h.dispatchEvent(new MouseEvent(t,{bubbles:true,cancelable:true,view:window})))}catch(_){} } return JSON.stringify({state:'hold_clicked',html:(h.outerHTML||'').slice(0,1200)}); })();""".trimIndent()) { holdRaw ->
+                            val holdResult = holdRaw.orEmpty().trim('"').replace("\\\"", "\"")
+                            if (holdResult.contains("hold_clicked")) {
+                                logEvent("Celebration ($name) Success")
+                                handler.postDelayed({
+                                    holdCelebrationIndex++
+                                    processHoldCelebrationVillage()
+                                }, 1200L)
+                            } else {
+                                handler.postDelayed({ processHoldCelebrationPage() }, 1000L)
+                            }
+                        }
+                    }
+                    exchangeFound > 0 -> {
+                        if (transferFound <= 0) {
+                            if (attempt < 15) {
+                                handler.postDelayed({ processHoldCelebrationPage() }, 1000L)
+                            } else {
+                                handler.postDelayed({ processHoldCelebrationPage() }, 3000L)
+                            }
+                            return@evaluateJavascript
+                        }
+                        holdCelebrationTransferPending = true
+                        holdCelebrationTransferAttempt = 0
+                        val clickJs = """
+                            (() => {
+                                const t=document.querySelector('.inlineIcon.resource.transfer.fillUp');
+                                if(!t)return JSON.stringify({state:'transfer_hero_missing'});
+                                const before=t.getAttribute('onclick')||'';
+                                t.scrollIntoView({block:'center',inline:'center'});
+                                try{t.click();}catch(e){try{t.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true,view:window}))}catch(_){} }
+                                return JSON.stringify({state:'transfer_hero_clicked',onclick:before,html:(t.outerHTML||'').slice(0,1500)});
+                            })();
+                        """.trimIndent()
+                        automationWebView()?.evaluateJavascript(clickJs) { clickRaw ->
+                            val clickResult = clickRaw.orEmpty().trim('"').replace("\\\"", "\"")
+                            if (clickResult.contains("transfer_hero_clicked")) {
+                                handler.postDelayed({ clickCelebrationTransferSelected(name) }, 1000L)
+                            } else {
+                                handler.postDelayed({ processHoldCelebrationPage() }, 1000L)
+                            }
+                        }
+                    }
+                    else -> {
+                        // Tidak ada Hold dan tidak ada Exchange Resources: village ini
+                        // tidak membutuhkan aksi Celebration. Langsung lanjut village berikutnya.
+                        holdCelebrationTransferPending = false
+                        holdCelebrationInspectAttempt = 0
+                        holdCelebrationTransferAttempt = 0
+                        handler.postDelayed({
+                            if (!running || !holdCelebrationInProgress) return@postDelayed
+                            holdCelebrationIndex++
+                            processHoldCelebrationVillage()
+                        }, 500L)
+                    }
+                }
+            }
+        }, 2000L)
+    }
+
+    private fun clickCelebrationTransferSelected(name: String) {
+        if (!running || !holdCelebrationInProgress || !holdCelebrationTransferPending) {
+            return
+        }
+
+        holdCelebrationTransferAttempt++
+        val attempt = holdCelebrationTransferAttempt
+
+        // Samakan persis pola pencarian tombol dengan Resource Builder / Town Builder.
+        // Hanya cari elemen kontrol yang visible dan benar-benar clickable; jangan scan
+        // seluruh DOM karena parent/wrapper React Travian juga dapat mengandung teks
+        // "Transfer selected" dan menghasilkan target yang salah.
+        val js = """
+            (() => {
+                const visible = el => {
+                    if (!el) return false;
+                    const s = getComputedStyle(el), r = el.getBoundingClientRect();
+                    return s.display !== 'none' && s.visibility !== 'hidden' &&
+                           s.opacity !== '0' && r.width > 0 && r.height > 0;
+                };
+                const norm = s => String(s || '').replace(/\s+/g,' ').trim().toLowerCase();
+
+                const selectors = [
+                    'button',
+                    'input[type=button]',
+                    'input[type=submit]',
+                    '[role="button"]',
+                    'a'
+                ];
+
+                let controls = [];
+                for (const sel of selectors) {
+                    try {
+                        controls.push(...document.querySelectorAll(sel));
+                    } catch (_) {}
+                }
+
+                controls = controls.filter(el =>
+                    visible(el) &&
+                    !el.disabled &&
+                    el.getAttribute('aria-disabled') !== 'true'
+                );
+
+                const textOf = el => norm(
+                    el.innerText || el.textContent || el.value ||
+                    el.title || el.getAttribute('aria-label') || ''
+                );
+
+                let btn = controls.find(el => {
+                    const t = textOf(el);
+                    return /transfer\s+selected/i.test(t);
+                });
+
+                if (!btn) {
+                    btn = controls.find(el => {
+                        const t = textOf(el);
+                        if (!/transfer/i.test(t) || !/selected/i.test(t)) return false;
+
+                        const childMatch = [...el.querySelectorAll('button,a,[role="button"],input')]
+                            .some(c => c !== el && visible(c) &&
+                                /transfer/i.test(textOf(c)) && /selected/i.test(textOf(c)));
+                        return !childMatch;
+                    });
+                }
+
+                if (!btn) {
+                    const dialog = document.querySelector('#reactDialogWrapper,[class*="reactDialog"]');
+                    const dialogText = dialog ? norm(dialog.innerText || dialog.textContent || '') : '';
+                    return JSON.stringify({
+                        state:'not_found',
+                        dialogVisible: !!dialog && visible(dialog),
+                        dialogHasTransfer: /transfer/i.test(dialogText),
+                        dialogText: dialogText.slice(0,500)
+                    });
+                }
+
+                const beforeText = textOf(btn);
+                const tag = btn.tagName;
+                const cls = String(btn.className || '');
+                btn.scrollIntoView({block:'center', inline:'center'});
+
+                try { btn.click(); } catch (_) {
+                    ['mousedown','mouseup','click'].forEach(type => {
+                        try {
+                            btn.dispatchEvent(new MouseEvent(type, {
+                                bubbles:true, cancelable:true, view:window
+                            }));
+                        } catch (_) {}
+                    });
+                }
+
+                return JSON.stringify({
+                    state:'clicked',
+                    tag,
+                    text:beforeText.slice(0,200),
+                    className:cls.slice(0,200)
+                });
+            })();
+        """.trimIndent()
+
+        automationWebView()?.evaluateJavascript(js) { raw ->
+            val result = raw.orEmpty().trim('"').replace("\\\"", "\"")
+
+            if (result.contains("\"state\":\"clicked\"")) {
+                handler.postDelayed({
+                    verifyCelebrationTransferSelectedCompleted(name)
+                }, 1200L)
+            } else if (attempt < 15) {
+                handler.postDelayed({ clickCelebrationTransferSelected(name) }, 500L)
+            } else {
+                holdCelebrationTransferAttempt = 0
+                handler.postDelayed({ clickCelebrationTransferSelected(name) }, 3000L)
+            }
+        }
+    }
+
+    private fun verifyCelebrationTransferSelectedCompleted(name: String) {
+        if (!running || !holdCelebrationInProgress || !holdCelebrationTransferPending) return
+
+        val js = """
+            (() => {
+                const visible = el => {
+                    if (!el) return false;
+                    const s=getComputedStyle(el), r=el.getBoundingClientRect();
+                    return s.display!=='none' && s.visibility!=='hidden' &&
+                           s.opacity!=='0' && r.width>0 && r.height>0;
+                };
+                const norm = s => String(s||'').replace(/\s+/g,' ').trim().toLowerCase();
+
+                const controls = [
+                    ...document.querySelectorAll('button'),
+                    ...document.querySelectorAll('input[type=button],input[type=submit]'),
+                    ...document.querySelectorAll('[role="button"]'),
+                    ...document.querySelectorAll('a')
+                ].filter(visible);
+
+                const stillThere = controls.some(el => {
+                    const t=norm(el.innerText||el.textContent||el.value||el.title||el.getAttribute('aria-label')||'');
+                    return /transfer\s+selected/i.test(t);
+                });
+
+                const dialog = document.querySelector('#reactDialogWrapper,[class*="reactDialog"]');
+                const dialogVisible = !!dialog && visible(dialog);
+
+                return JSON.stringify({
+                    stillThere,
+                    dialogVisible,
+                    dialogText: dialog ? norm(dialog.innerText||dialog.textContent||'').slice(0,300) : ''
+                });
+            })();
+        """.trimIndent()
+
+        automationWebView()?.evaluateJavascript(js) { raw ->
+            val result = raw.orEmpty().trim('"').replace("\\\"", "\"")
+
+            val stillThere = result.contains("\"stillThere\":true")
+            if (stillThere) {
+                handler.postDelayed({ clickCelebrationTransferSelected(name) }, 500L)
+                return@evaluateJavascript
+            }
+            holdCelebrationTransferPending = false
+            holdCelebrationInspectAttempt = 0
+            holdCelebrationTransferAttempt = 0
+            val id = holdCelebrationVillages.getOrNull(holdCelebrationIndex)?.first.orEmpty()
+            handler.postDelayed({
+                if (!running || !holdCelebrationInProgress) return@postDelayed
+                automationWebView()?.loadUrl("${server}/build.php?id=30&gid=24&newdid=$id")
+            }, 800L)
+        }
+    }
+
+    private fun finishHoldCelebrationCycle() {
+        handler.removeCallbacks(celebrationTimeoutRunnable)
+        val now = System.currentTimeMillis()
+        if (holdCelebrationCycleStartedAt > 0L) {
+            val duration = (now - holdCelebrationCycleStartedAt).coerceAtLeast(0L)
+            getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                .putLong("hold_celebration_cycle_duration_ms", duration)
+                .putLong("hold_celebration_cycle_started_at", 0L)
+                .apply()
+            holdCelebrationCycleStartedAt = 0L
+        }
+        holdCelebrationInProgress = false
+        holdCelebrationTransferPending = false
+        holdCelebrationVillages.clear()
+        holdCelebrationIndex = 0
+        holdCelebrationInspectAttempt = 0
+        holdCelebrationTransferAttempt = 0
         logEvent("CICLE END")
+        // Refresh Village WAJIB langsung dijalankan setelah CICLE END.
         scheduleNextRandomRun()
-        updateNotification("Next Run ${timeFormat.format(Date(nextAt))} | dalam ${formatDuration((nextAt - System.currentTimeMillis()).coerceAtLeast(0L))}")
+        handler.removeCallbacks(delayedVillageRefreshRunnable)
+        handler.post {
+            if (running && !villageRefreshInProgress && !villageRefreshCompleted) {
+                logEvent("AUTO REFRESH VILLAGE: dimulai langsung setelah CICLE END")
+                startAutomaticVillageRefresh()
+            }
+        }
+        updateNotification("Refresh Village setelah CICLE END | Next Run ${timeFormat.format(Date(nextAt))}")
     }
 
     private fun clickTownUpgrade() {
         if (!running || !townBuilderInProgress) return
+
+        // Town Builder pada halaman Travian menggunakan tombol seperti:
+        // <button type="button" value="Upgrade to level 2"
+        //         class="textButtonV1 green build"
+        //         onclick="... window.location.href = '/dorf2.php?...'; ...">
+        // Jadi prioritaskan selector tersebut secara langsung. Jangan hanya
+        // mengandalkan href karena button ini memang tidak mempunyai href.
         val js = """
             (() => {
-                const visible = el => { if (!el) return false; const s=getComputedStyle(el),r=el.getBoundingClientRect(); return s.display!=='none'&&s.visibility!=='hidden'&&r.width>0&&r.height>0; };
-                const norm = x => String(x||'').replace(/\\s+/g,' ').trim().toLowerCase();
-                const all=[...document.querySelectorAll('button,a,input[type=submit],input[type=button],[role=button]')].filter(el=>visible(el)&&!el.disabled);
-                const btn=all.find(el=>/upgrade\\s+to\\s+level|^upgrade$|^build$/i.test(norm(el.innerText||el.textContent||el.value||el.title||el.getAttribute('aria-label')||''))) || all.find(el=>/upgrade|build/i.test(norm(el.innerText||el.textContent||el.value||'')));
-                if(!btn) return 'not-found';
-                btn.scrollIntoView({block:'center'});
-                const href=btn.getAttribute('href')||'';
-                if(href && /build\\.php/i.test(href)){ window.location.href=href; return 'navigated'; }
-                btn.click(); return 'clicked';
+                const visible = el => {
+                    if (!el) return false;
+                    const s = getComputedStyle(el);
+                    const r = el.getBoundingClientRect();
+                    return s.display !== 'none' && s.visibility !== 'hidden' &&
+                           s.opacity !== '0' && r.width > 0 && r.height > 0;
+                };
+
+                const norm = value => String(value || '').replace(/\s+/g, ' ').trim();
+                const lower = value => norm(value).toLowerCase();
+
+                const isUpgradeText = value =>
+                    /^(?:upgrade\s+to(?:\s+level)?(?:\s+\d+)?|upgrade)$/i.test(norm(value));
+
+                const isBad = el => {
+                    const all = lower(
+                        (el?.innerText || '') + ' ' +
+                        (el?.textContent || '') + ' ' +
+                        (el?.value || '') + ' ' +
+                        (el?.className || '')
+                    );
+                    return /cancel|demolish|destroy|remove/.test(all);
+                };
+
+                // 1. Exact Travian Town Builder button.
+                // This matches the DOM supplied by the user:
+                // button.textButtonV1.green.build[value="Upgrade to level 2"]
+                const exactButtons = [...document.querySelectorAll(
+                    'button.textButtonV1.green.build, button.green.build, button.build'
+                )].filter(el =>
+                    visible(el) && !el.disabled &&
+                    el.getAttribute('aria-disabled') !== 'true' && !isBad(el)
+                );
+
+                let btn = exactButtons.find(el =>
+                    isUpgradeText(el.getAttribute('value')) ||
+                    isUpgradeText(el.innerText) ||
+                    isUpgradeText(el.textContent)
+                );
+
+                // 2. Fallback: any button whose visible text/value is Upgrade to...
+                if (!btn) {
+                    const controls = [...document.querySelectorAll(
+                        'button,a,input[type=submit],input[type=button],[role=button]'
+                    )].filter(el =>
+                        visible(el) && !el.disabled &&
+                        el.getAttribute('aria-disabled') !== 'true' && !isBad(el)
+                    );
+
+                    btn = controls.find(el => {
+                        const text = norm(
+                            el.innerText || el.textContent || el.value ||
+                            el.getAttribute('aria-label') || el.title || ''
+                        );
+                        return /upgrade\s+to(?:\s+level)?(?:\s+\d+)?/i.test(text) ||
+                               /^upgrade$/i.test(text);
+                    });
+                }
+
+                if (!btn) return 'not-found';
+
+                btn.scrollIntoView({block:'center', inline:'center'});
+
+                const label = norm(
+                    btn.getAttribute('value') || btn.innerText || btn.textContent || 'Upgrade'
+                );
+                const onclick = String(btn.getAttribute('onclick') || '');
+
+                // Travian's actual button contains window.location.href in onclick.
+                // Keep this as a fallback in case HTMLElement.click() is intercepted.
+                const match = onclick.match(/window\\.location\\.href\s*=\s*['\"]([^'\"]+)['\"]/i);
+                const target = match ? match[1].replace(/&amp;/g, '&') : '';
+
+                try {
+                    btn.click();
+                } catch (e) {
+                    if (target) {
+                        window.location.href = target;
+                        return 'navigated-fallback:' + label;
+                    }
+                    return 'click-error:' + label;
+                }
+
+                // If the click did not start navigation synchronously, use the
+                // exact URL from onclick as a deterministic fallback.
+                if (target && window.location.href.indexOf(target) === -1) {
+                    setTimeout(() => {
+                        try {
+                            if (window.location.href.indexOf(target) === -1) {
+                                window.location.href = target;
+                            }
+                        } catch (_) {}
+                    }, 250);
+                }
+
+                return 'clicked:' + label + (target ? '|target:' + target : '');
             })();
         """.trimIndent()
+
         automationWebView()?.evaluateJavascript(js) { raw ->
-            val result=raw.orEmpty().trim('"').replace("\\\"", "\"")
-            if(result.contains("clicked") || result.contains("navigated")){
-                val name=builderVillages.getOrNull(builderVillageIndex)?.second ?: "Village ${builderVillageIndex+1}"
+            val result = raw.orEmpty().trim('"').replace("\\\"", "\"")
+            val name = builderVillages.getOrNull(builderVillageIndex)?.second
+                ?: "Village ${builderVillageIndex + 1}"
+
+            if (result.startsWith("clicked") || result.startsWith("navigated")) {
                 builderStage = "TOWN_ADVANCING"
-                logEvent("Town Village $name Upgrade Success")
-                handler.postDelayed({ advanceTownBuilderVillage() },1200L)
+                logEvent("Town Village $name Upgrade Success — $result")
+                handler.postDelayed({ advanceTownBuilderVillage() }, 1500L)
             } else {
-                inventoryUseAttempt=0
-                pendingUpgradeUrl=automationWebView()?.url.orEmpty().ifBlank { pendingUpgradeUrl }
+                // Upgrade benar-benar tidak ditemukan. Baru setelah itu
+                // gunakan jalur Hero Transfer yang lama.
+                logEvent("Town Builder: tombol Upgrade tidak ditemukan ($result) — masuk jalur Hero Transfer")
+                inventoryUseAttempt = 0
+                pendingUpgradeUrl = automationWebView()?.url.orEmpty().ifBlank { pendingUpgradeUrl }
                 clickRedResourceForTransfer()
             }
         }
@@ -2695,6 +3375,7 @@ private fun clickTransferSelected() {
 
     private fun finishResourceBuilderCycle() {
         debugTrace("ENTER finishResourceBuilderCycle")
+        handler.removeCallbacks(resourceBuilderTimeoutRunnable)
         val now = System.currentTimeMillis()
         if (resourceBuilderCycleStartedAt > 0L) {
             val duration = (now - resourceBuilderCycleStartedAt).coerceAtLeast(0L)
@@ -2707,6 +3388,10 @@ private fun clickTransferSelected() {
         }
         if (!townBuilderInProgress && townBuilderEnabled) {
             startTownBuilderCycle()
+            return
+        }
+        if (!townBuilderInProgress) {
+            startHoldCelebrationCycle()
             return
         }
         builderInProgress = false
@@ -3013,6 +3698,11 @@ private fun clickTransferSelected() {
             edit.putLong("town_cycle_started_at", 0L)
             townBuilderCycleStartedAt = 0L
         }
+        if (holdCelebrationCycleStartedAt > 0L) {
+            edit.putLong("hold_celebration_cycle_duration_ms", (now - holdCelebrationCycleStartedAt).coerceAtLeast(0L))
+            edit.putLong("hold_celebration_cycle_started_at", 0L)
+            holdCelebrationCycleStartedAt = 0L
+        }
         edit.apply()
     }
 
@@ -3054,8 +3744,8 @@ private fun clickTransferSelected() {
             handler.postDelayed(nextRunRunnable, remaining)
             return@Runnable
         }
-        logEvent("Countdown berakhir — memulai siklus")
-        triggerScheduledCycle()
+        logEvent("Countdown berakhir — kill semua proses yang tersisa dan wajib CICLE START")
+        forceStartCycleAtCountdownZero()
     }
 
     private fun updateNextRun(delayMs: Long) {
@@ -3216,7 +3906,6 @@ private fun clickTransferSelected() {
         var s = value.trim()
         if (s.isBlank()) s = getSharedPreferences(PREFS, MODE_PRIVATE).getString("server", "").orEmpty().trim()
         if (s.isBlank()) s = runCatching { CredentialDatabase(this).read()?.server.orEmpty() }.getOrDefault("").trim()
-        if (s.isBlank()) s = "https://ts20.x2.europe.travian.com"
         if (!s.startsWith("http", true)) s = "https://$s"
         return s.trimEnd('/')
     }
@@ -3227,6 +3916,32 @@ private fun clickTransferSelected() {
     }
 
     private fun logEvent(message: String) {
+        // Simpan semua debug Celebration ke log file.
+        if (message.startsWith("[CELEBRATION DEBUG]")) {
+            val cycleTagged =
+                if (cycleNumber > 0) "[CYCLE $cycleNumber] $message" else message
+            val line = "${logTimeFormat.format(Date())} | $cycleTagged"
+            try {
+                openFileOutput(logFileName, MODE_APPEND).bufferedWriter().use {
+                    it.appendLine(line)
+                }
+            } catch (_: Exception) {}
+            return
+        }
+
+        // Log ringkas khusus timeout modul dan Celebration success harus selalu disimpan.
+        if (message == "Res Builder over 4 min, process stop" ||
+            message == "Town Builder over 4 min, process stop" ||
+            message == "Celebration over 4 min, process stop" ||
+            (message.startsWith("Celebration (") && message.endsWith(") Success"))) {
+            val cycleTagged = if (cycleNumber > 0) "[CYCLE $cycleNumber] $message" else message
+            val line = "${logTimeFormat.format(Date())} | $cycleTagged"
+            try {
+                openFileOutput(logFileName, MODE_APPEND).bufferedWriter().use { it.appendLine(line) }
+            } catch (_: Exception) {}
+            return
+        }
+
         // END Town Builder harus tetap dicatat walaupun flag townBuilderInProgress
         // sudah dimatikan sebelum fungsi ini dipanggil.
         if (message == "Town Builder: END") {
@@ -3338,6 +4053,15 @@ private fun clickTransferSelected() {
                             logEvent("Form login Travian tidak dikenali")
                         }
                     }
+                }
+            }
+        }
+
+        @JavascriptInterface
+        fun onHoldCelebrationClick(villageName: String) {
+                        handler.post {
+                if (running && holdCelebrationInProgress) {
+                    logEvent("Celebration ($villageName) Success")
                 }
             }
         }

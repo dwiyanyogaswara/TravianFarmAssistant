@@ -20,7 +20,7 @@
             android:layout_weight="1"/>
         <Button
             android:id="@+id/capacityTabButton"
-            android:text="📊 Capacity Overview"
+            android:text="📊 Capacity"
             android:backgroundTint="#1565C0"
             android:textColor="#FFFFFF"
             android:textSize="12sp"
@@ -29,7 +29,7 @@
             android:layout_weight="1"/>
         <Button
             android:id="@+id/dbTabButton"
-            android:text="🗄 DB Overview"
+            android:text="🗄 Database"
             android:backgroundTint="#455A64"
             android:textColor="#FFFFFF"
             android:textSize="12sp"
@@ -178,7 +178,7 @@
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"/>
                     <TextView
-                        android:text="Pilih village untuk Resource Builder"
+                        android:text="Pilih village untuk Resource Builder / Hold Celebration"
                         android:textStyle="bold"
                         android:layout_marginTop="4dp"
                         android:layout_width="match_parent"
@@ -215,6 +215,11 @@
                     <TextView
                         android:id="@+id/townCycleTime"
                         android:text="Waktu Siklus Town Builder: 00:00:00"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"/>
+                    <TextView
+                        android:id="@+id/holdCelebrationCycleTime"
+                        android:text="Waktu Siklus Hold Celebration: 00:00:00"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"/>
                     <TextView
