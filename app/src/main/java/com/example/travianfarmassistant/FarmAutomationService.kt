@@ -126,6 +126,8 @@ class FarmAutomationService : Service() {
         val resourceGid: String,
         val minLvl: Int,
         val linkTown: String,
+        val townId: String,
+        val townGid: String,
         val isHoldCelebration: Boolean
     )
 
@@ -166,6 +168,8 @@ class FarmAutomationService : Service() {
                     resourceGid = item.optString("ResourceGid").trim(),
                     minLvl = item.optInt("MinLvl", -1),
                     linkTown = rebaseTravianUrl(item.optString("LinkTown", "-").trim().ifBlank { "-" }),
+                    townId = item.optString("TownId", "").trim(),
+                    townGid = item.optString("TownGid", "").trim(),
                     isHoldCelebration = item.optBoolean("IsHoldCelebration", false)
                 )
             )
@@ -186,6 +190,8 @@ class FarmAutomationService : Service() {
                 put("ResourceGid", item.resourceGid)
                 put("MinLvl", item.minLvl)
                 put("LinkTown", rebaseTravianUrl(item.linkTown))
+                put("TownId", item.townId)
+                put("TownGid", item.townGid)
                 put("IsHoldCelebration", item.isHoldCelebration)
             })
         }
@@ -1871,6 +1877,8 @@ class FarmAutomationService : Service() {
                 put("ResourceGid", item.resourceGid)
                 put("MinLvl", item.minLvl)
                 put("LinkTown", rebaseTravianUrl(item.linkTown))
+                put("TownId", item.townId)
+                put("TownGid", item.townGid)
             })
         }
         getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString("village_data_json", array.toString()).apply()

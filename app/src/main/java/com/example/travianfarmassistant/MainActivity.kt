@@ -93,6 +93,8 @@ class MainActivity : Activity() {
         val resourceGid: String,
         val minLvl: Int,
         val linkTown: String,
+        val townId: String,
+        val townGid: String,
         val isHoldCelebration: Boolean
     )
 
@@ -145,6 +147,8 @@ class MainActivity : Activity() {
                     resourceGid = item.optString("ResourceGid").trim(),
                     minLvl = item.optInt("MinLvl", -1),
                     linkTown = rebaseTravianUrl(item.optString("LinkTown", "-").trim().ifBlank { "-" }),
+                    townId = item.optString("TownId", "").trim(),
+                    townGid = item.optString("TownGid", "").trim(),
                     isHoldCelebration = item.optBoolean("IsHoldCelebration", false)
                 )
             )
@@ -166,6 +170,8 @@ class MainActivity : Activity() {
                 put("ResourceGid", item.resourceGid)
                 put("MinLvl", item.minLvl)
                 put("LinkTown", rebaseTravianUrl(item.linkTown))
+                put("TownId", item.townId)
+                put("TownGid", item.townGid)
                 put("IsHoldCelebration", item.isHoldCelebration)
             })
         }
@@ -184,6 +190,8 @@ class MainActivity : Activity() {
         resourceGid: String? = null,
         minLvl: Int? = null,
         linkTown: String? = null,
+        townId: String? = null,
+        townGid: String? = null,
         isChecklist: Boolean? = null,
         isHoldCelebration: Boolean? = null
     ) {
@@ -203,6 +211,8 @@ class MainActivity : Activity() {
             resourceGid = resourceGid?.trim()?.takeIf { it.isNotBlank() } ?: old?.resourceGid.orEmpty(),
             minLvl = minLvl ?: old?.minLvl ?: -1,
             linkTown = linkTown?.trim()?.takeIf { it.isNotBlank() } ?: old?.linkTown ?: "-",
+            townId = townId?.trim() ?: old?.townId.orEmpty(),
+            townGid = townGid?.trim() ?: old?.townGid.orEmpty(),
             isHoldCelebration = isHoldCelebration ?: old?.isHoldCelebration ?: false
         )
         if (index >= 0) records[index] = updated else records.add(updated)
@@ -973,10 +983,10 @@ class MainActivity : Activity() {
 
         val lines = mutableListOf<String>()
         lines += "DATABASE VILLAGE (${records.size})"
-        lines += "CHK | NAMA | ID | LINK VILLAGE | LINK RESOURCE | RES ID | GID | MIN LVL | LINK TOWN | HOLD CELEBRATION"
-        lines += "----+------+----+--------------+---------------+--------+-----+-------+---------+-----------------"
+        lines += "CHK | NAMA | ID | LINK VILLAGE | LINK RESOURCE | RES ID | GID | MIN LVL | TOWN ID | TOWN GID | LINK TOWN | HOLD CELEBRATION"
+        lines += "----+------+----+--------------+---------------+--------+-----+-------+---------+----------+-----------+-----------------"
         records.forEach { item ->
-            lines += "${if (item.isChecklist) "✓" else "-"} | ${item.namaVillage} | ${item.id} | ${item.linkVillage.ifBlank { "-" }} | ${item.linkResource.ifBlank { "-" }} | ${item.resourceId.ifBlank { "-" }} | ${item.resourceGid.ifBlank { "-" }} | ${if (item.minLvl >= 0) "L${item.minLvl}" else "-"} | ${item.linkTown.ifBlank { "-" }} | ${if (item.isHoldCelebration) "✓" else "-"}"
+            lines += "${if (item.isChecklist) "✓" else "-"} | ${item.namaVillage} | ${item.id} | ${item.linkVillage.ifBlank { "-" }} | ${item.linkResource.ifBlank { "-" }} | ${item.resourceId.ifBlank { "-" }} | ${item.resourceGid.ifBlank { "-" }} | ${if (item.minLvl >= 0) "L${item.minLvl}" else "-"} | ${item.townId.ifBlank { "-" }} | ${item.townGid.ifBlank { "-" }} | ${item.linkTown.ifBlank { "-" }} | ${if (item.isHoldCelebration) "✓" else "-"}"
         }
         villageDatabaseView.text = lines.joinToString("\n")
         villageDatabaseView.setTextIsSelectable(true)
@@ -1058,18 +1068,32 @@ class MainActivity : Activity() {
             "$townServer/build.php?id=30&gid=24" to "Town Hall",
             "$townServer/build.php?id=34&gid=37" to "Hero's Mansion",
             "$townServer/build.php?id=20&gid=23" to "Cranny",
-            "$townServer/build.php?id=36&gid=21" to "Workshop"
+            "$townServer/build.php?id=36&gid=21" to "Workshop",
+            "__OTHER__" to "Others"
         )
 
         loadedVillages.entries.toList().forEach { (id, name) ->
 
             val record = villageRecords[id]
             val currentMinLevel = record?.minLvl ?: -1
-            val currentTownKey = record?.linkTown?.trim().orEmpty().ifBlank { "-" }
+            val standardTownKeys = townOptions.map { it.first }.filter { it != "__OTHER__" }.toSet()
+            val currentTownKey = record?.linkTown?.trim().orEmpty().ifBlank { "-" }.let {
+                if (it in standardTownKeys) it else if (!record?.townId.isNullOrBlank() || !record?.townGid.isNullOrBlank()) "__OTHER__" else it
+            }
+            val currentTownId = record?.townId.orEmpty()
+            val currentTownGid = record?.townGid.orEmpty()
             val currentHoldCelebration = record?.isHoldCelebration ?: false
 
+            lateinit var cardTownId: EditText
+            lateinit var cardTownGid: EditText
+            lateinit var otherInputRow: LinearLayout
+
             fun townDisplayText(townKey: String): String {
-                val townText = townOptions.firstOrNull { it.first == townKey }?.second ?: "-"
+                val townText = if (townKey == "__OTHER__") {
+                    val oid = if (::cardTownId.isInitialized) cardTownId.text.toString().trim() else currentTownId
+                    val ogid = if (::cardTownGid.isInitialized) cardTownGid.text.toString().trim() else currentTownGid
+                    if (oid.isNotBlank() || ogid.isNotBlank()) "Others (id=$oid gid=$ogid)" else "Others"
+                } else townOptions.firstOrNull { it.first == townKey }?.second ?: "-"
                 val minText = if (currentMinLevel >= 0) "L$currentMinLevel" else "-"
                 val displayName = name.substringBefore(" - Lvl ").trim().ifBlank { name }
                 return "$displayName - min lvl $minText - $townText"
@@ -1150,17 +1174,81 @@ class MainActivity : Activity() {
                 onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
                     override fun onNothingSelected(parent: android.widget.AdapterView<*>?) = Unit
                     override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: View?, position: Int, itemId: Long) {
+                        if (!::otherInputRow.isInitialized || !::cardTownId.isInitialized || !::cardTownGid.isInitialized) return
                         val selectedLink = townOptions.getOrNull(position)?.first ?: "-"
-                        box.text = townDisplayText(selectedLink)
-                        val recordsNow = loadVillageDataRecords()
-                        val idx = recordsNow.indexOfFirst { it.id == id }
-                        if (idx >= 0) {
-                            recordsNow[idx] = recordsNow[idx].copy(linkTown = selectedLink)
-                            saveVillageDataRecords(recordsNow)
+                        if (selectedLink == "__OTHER__") {
+                            otherInputRow.visibility = View.VISIBLE
+                            val oid = cardTownId.text.toString().trim()
+                            val ogid = cardTownGid.text.toString().trim()
+                            val link = if (oid.isNotBlank() && ogid.isNotBlank()) "$townServer/build.php?id=$oid&gid=$ogid" else "-"
+                            val recordsNow = loadVillageDataRecords()
+                            val idx = recordsNow.indexOfFirst { it.id == id }
+                            if (idx >= 0) {
+                                recordsNow[idx] = recordsNow[idx].copy(linkTown = link, townId = oid, townGid = ogid)
+                                saveVillageDataRecords(recordsNow)
+                            }
+                        } else {
+                            otherInputRow.visibility = View.GONE
+                            box.text = townDisplayText(selectedLink)
+                            val recordsNow = loadVillageDataRecords()
+                            val idx = recordsNow.indexOfFirst { it.id == id }
+                            if (idx >= 0) {
+                                recordsNow[idx] = recordsNow[idx].copy(linkTown = selectedLink, townId = "", townGid = "")
+                                saveVillageDataRecords(recordsNow)
+                            }
                         }
+                        box.text = townDisplayText(selectedLink)
                     }
                 }
             }
+
+            otherInputRow = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = android.view.Gravity.CENTER_VERTICAL
+                visibility = if (currentTownKey == "__OTHER__") View.VISIBLE else View.GONE
+                layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+            }
+
+            cardTownId = EditText(this).apply {
+                hint = "ID"
+                inputType = android.text.InputType.TYPE_CLASS_NUMBER
+                text = currentTownId
+                textSize = 13f
+                setSingleLine(true)
+                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+                    setMargins(4, 0, 4, 0)
+                }
+                isEnabled = !selectionControlsLocked
+            }
+            cardTownGid = EditText(this).apply {
+                hint = "GID"
+                inputType = android.text.InputType.TYPE_CLASS_NUMBER
+                text = currentTownGid
+                textSize = 13f
+                setSingleLine(true)
+                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+                    setMargins(4, 0, 4, 0)
+                }
+                isEnabled = !selectionControlsLocked
+            }
+
+            fun saveOtherTown() {
+                val oid = cardTownId.text.toString().trim()
+                val ogid = cardTownGid.text.toString().trim()
+                val link = if (oid.isNotBlank() && ogid.isNotBlank()) "$townServer/build.php?id=$oid&gid=$ogid" else "-"
+                val recordsNow = loadVillageDataRecords()
+                val idx = recordsNow.indexOfFirst { it.id == id }
+                if (idx >= 0) {
+                    recordsNow[idx] = recordsNow[idx].copy(linkTown = link, townId = oid, townGid = ogid)
+                    saveVillageDataRecords(recordsNow)
+                    box.text = townDisplayText("__OTHER__")
+                }
+            }
+            cardTownId.setOnFocusChangeListener { _, hasFocus -> if (!hasFocus && currentTownKey == "__OTHER__") saveOtherTown() }
+            cardTownGid.setOnFocusChangeListener { _, hasFocus -> if (!hasFocus && currentTownKey == "__OTHER__") saveOtherTown() }
+
+            otherInputRow.addView(cardTownId)
+            otherInputRow.addView(cardTownGid)
 
             val hold = CheckBox(this).apply {
                 text = "isHoldCelebration"
@@ -1177,6 +1265,7 @@ class MainActivity : Activity() {
             townAndHold.addView(hold)
             card.addView(box)
             card.addView(townAndHold)
+            card.addView(otherInputRow)
             villageChecklist.addView(card)
         }
 
