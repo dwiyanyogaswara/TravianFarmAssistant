@@ -1084,14 +1084,15 @@ class MainActivity : Activity() {
             val currentTownGid = record?.townGid.orEmpty()
             val currentHoldCelebration = record?.isHoldCelebration ?: false
 
+            var townFieldsInitialized = false
             lateinit var cardTownId: EditText
             lateinit var cardTownGid: EditText
             lateinit var otherInputRow: LinearLayout
 
             fun townDisplayText(townKey: String): String {
                 val townText = if (townKey == "__OTHER__") {
-                    val oid = if (::cardTownId.isInitialized) cardTownId.text.toString().trim() else currentTownId
-                    val ogid = if (::cardTownGid.isInitialized) cardTownGid.text.toString().trim() else currentTownGid
+                    val oid = if (townFieldsInitialized) cardTownId.text.toString().trim() else currentTownId
+                    val ogid = if (townFieldsInitialized) cardTownGid.text.toString().trim() else currentTownGid
                     if (oid.isNotBlank() || ogid.isNotBlank()) "Others (id=$oid gid=$ogid)" else "Others"
                 } else townOptions.firstOrNull { it.first == townKey }?.second ?: "-"
                 val minText = if (currentMinLevel >= 0) "L$currentMinLevel" else "-"
@@ -1174,7 +1175,7 @@ class MainActivity : Activity() {
                 onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
                     override fun onNothingSelected(parent: android.widget.AdapterView<*>?) = Unit
                     override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: View?, position: Int, itemId: Long) {
-                        if (!::otherInputRow.isInitialized || !::cardTownId.isInitialized || !::cardTownGid.isInitialized) return
+                        if (!townFieldsInitialized) return
                         val selectedLink = townOptions.getOrNull(position)?.first ?: "-"
                         if (selectedLink == "__OTHER__") {
                             otherInputRow.visibility = View.VISIBLE
@@ -1212,7 +1213,7 @@ class MainActivity : Activity() {
             cardTownId = EditText(this).apply {
                 hint = "ID"
                 inputType = android.text.InputType.TYPE_CLASS_NUMBER
-                text = currentTownId
+                setText(currentTownId)
                 textSize = 13f
                 setSingleLine(true)
                 layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
@@ -1223,7 +1224,7 @@ class MainActivity : Activity() {
             cardTownGid = EditText(this).apply {
                 hint = "GID"
                 inputType = android.text.InputType.TYPE_CLASS_NUMBER
-                text = currentTownGid
+                setText(currentTownGid)
                 textSize = 13f
                 setSingleLine(true)
                 layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
@@ -1249,7 +1250,8 @@ class MainActivity : Activity() {
 
             otherInputRow.addView(cardTownId)
             otherInputRow.addView(cardTownGid)
-
+            townFieldsInitialized = true
+            
             val hold = CheckBox(this).apply {
                 text = "isHoldCelebration"
                 textSize = 11f
